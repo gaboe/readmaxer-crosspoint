@@ -65,6 +65,8 @@ const char* resultName(Result r) {
       return "WRITE_FAIL";
     case Result::OTADATA_FAIL:
       return "OTADATA_FAIL";
+    case Result::BAD_READBACK:
+      return "BAD_READBACK";
   }
   return "?";
 }
@@ -272,7 +274,39 @@ Result validateImageFile(const char* sdPath, size_t partitionSize) {
   return Result::OK;
 }
 
-Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx, bool alreadyValidated) {
+namespace {
+// SHA-256 of the first `size` bytes of `sdPath`, read in CHUNK pieces through `buf`.
+bool hashFile(const char* sdPath, size_t size, uint8_t* buf, uint8_t (&out)[SHA_TRAILER]) {
+  HalFile file;
+  if (!Storage.openFileForRead("FLASH", sdPath, file) || !file) return false;
+  mbedtls_sha256_context sha;
+  mbedtls_sha256_init(&sha);
+  mbedtls_sha256_starts(&sha, /*is224=*/0);
+  const bool ok = feedHashAndChecksum(file, size, nullptr, &sha, buf, nullptr) == Result::OK;
+  mbedtls_sha256_finish(&sha, out);
+  mbedtls_sha256_free(&sha);
+  file.close();
+  return ok;
+}
+
+// SHA-256 of the first `size` bytes of `part`, read back from flash.
+bool hashPartition(const esp_partition_t* part, size_t size, uint8_t* buf, uint8_t (&out)[SHA_TRAILER]) {
+  mbedtls_sha256_context sha;
+  mbedtls_sha256_init(&sha);
+  mbedtls_sha256_starts(&sha, /*is224=*/0);
+  bool ok = true;
+  for (size_t pos = 0; ok && pos < size; pos += CHUNK) {
+    const size_t want = std::min<size_t>(CHUNK, size - pos);
+    ok = esp_partition_read(part, pos, buf, want) == ESP_OK;
+    if (ok) mbedtls_sha256_update(&sha, buf, want);
+  }
+  mbedtls_sha256_finish(&sha, out);
+  mbedtls_sha256_free(&sha);
+  return ok;
+}
+}  // namespace
+
+Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx) {
   // Resolve destination first so we can size-check during validation. The full image-integrity
   // pass below verifies header, segment table, XOR checksum and SHA256 trailer end-to-end before
   // we touch otadata, so a truncated/corrupted .bin can never become the next boot target.
@@ -282,17 +316,15 @@ Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx, boo
     return Result::NO_PARTITION;
   }
 
-  // When the caller already ran validateImageFile() against this same partition
-  // size (e.g. SdFirmwareUpdateActivity validates before the confirmation
-  // prompt), skip the redundant integrity scan. We still keep the partition
-  // lookup so the rest of the flashing path stays unchanged.
-  if (!alreadyValidated) {
-    const Result validateRes = validateImageFile(sdPath, dest->size);
-    if (validateRes != Result::OK) {
-      LOG_ERR("FLASH", "image validation failed: %s", resultName(validateRes));
-      return validateRes;
-    }
+  const Result validateRes = validateImageFile(sdPath, dest->size);
+  if (validateRes != Result::OK) {
+    LOG_ERR("FLASH", "image validation failed: %s", resultName(validateRes));
+    return validateRes;
   }
+
+  // While the boot fallback is armed, otadata selects `dest`. Select the
+  // running slot first so an interrupted write never leaves a partial image selected.
+  if (!ota_boot::confirmRunningSlot()) return Result::OTADATA_FAIL;
 
   HalFile file;
   if (!Storage.openFileForRead("FLASH", sdPath, file) || !file) {
@@ -346,6 +378,20 @@ Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx, boo
     delay(1);
   }
   file.close();
+
+  // A fresh file read, not the bytes just written: an SD read error inside the
+  // write loop would otherwise be hashed and written alike.
+  uint8_t fileSha[SHA_TRAILER];
+  uint8_t slotSha[SHA_TRAILER];
+  if (!hashFile(sdPath, firmwareSize, buffer.get(), fileSha) ||
+      !hashPartition(dest, firmwareSize, buffer.get(), slotSha)) {
+    LOG_ERR("FLASH", "readback read failed");
+    return Result::READ_FAIL;
+  }
+  if (std::memcmp(fileSha, slotSha, SHA_TRAILER) != 0) {
+    LOG_ERR("FLASH", "readback SHA-256 mismatch; otadata unchanged");
+    return Result::BAD_READBACK;
+  }
 
   if (!ota_boot::switchTo(dest)) {
     LOG_ERR("FLASH", "otadata switch failed");

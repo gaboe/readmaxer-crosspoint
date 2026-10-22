@@ -162,10 +162,8 @@ void SdFirmwareUpdateActivity::performUpdate() {
     self->requestUpdate(true);
   };
 
-  // Re-validate at flash time (TOCTOU): SD is removable, so don't trust the
-  // pre-confirmation pass. The alreadyValidated parameter on the API stays
-  // for callers (e.g. an OTA staging path) where the same byte stream was
-  // just hashed and there's no removable-media gap.
+  // flashFromSdPath re-validates at flash time (TOCTOU): SD is removable, so
+  // the pre-confirmation pass is not trusted.
   const auto result = firmware_flash::flashFromSdPath(firmwarePath.c_str(), progressCb, this);
   if (result != firmware_flash::Result::OK) {
     LOG_ERR("FW", "flash failed: %s", firmware_flash::resultName(result));
