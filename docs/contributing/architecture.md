@@ -195,7 +195,7 @@ When editing related source assets, regenerate via normal build steps/scripts.
 ## Key directories
 
 - `src/`: app orchestration, settings/state, and activity implementations
-- `src/network/`: web server and OTA/update networking
+- `src/network/`: web server, SD card firmware update, and boot slot switching
 - `src/components/`: theming and shared UI components
 - `lib/hal/`: hardware abstraction wrappers around freeink-sdk
 - `lib/Epub/`: EPUB parser, layout, CSS handling, and hyphenation
