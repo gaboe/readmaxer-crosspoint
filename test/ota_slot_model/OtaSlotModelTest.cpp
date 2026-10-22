@@ -45,14 +45,20 @@ uint32_t bootloaderSelect(Otadata& otadata, bool rollback) {
 }
 
 // What the fork does in setup(), with the other slot holding an app image.
-BootPlan forkSetup(Otadata& otadata, uint32_t runningSlot) {
-  const BootPlan plan = planBoot(otadata, runningSlot, /*deepSleepWake=*/false, /*otherSlotHoldsImage=*/true);
-  if (plan.selectOtherSlot) apply(otadata, planSelect(otadata, 1 - runningSlot, kOtaImgValid));
+BootPlan forkSetup(Otadata& otadata, uint32_t runningSlot, bool deepSleepWake = false) {
+  const BootPlan plan = planBoot(otadata, runningSlot, deepSleepWake);
+  if (plan.armFallback) apply(otadata, planSelect(otadata, 1 - runningSlot, kOtaImgValid));
   return plan;
 }
 
 void forkHomeRendered(Otadata& otadata, uint32_t runningSlot, const BootPlan& plan) {
   if (plan.confirmAfterHome) apply(otadata, planSelect(otadata, runningSlot, kOtaImgValid));
+}
+
+// keepRunningSlot() before a deliberate sleep or idle while confirmation is pending.
+void forkKeepsRunningSlot(Otadata& otadata, uint32_t runningSlot, const BootPlan& plan) {
+  EntryWrite write{};
+  if (plan.confirmAfterHome && planKeepRunningSlot(otadata, runningSlot, write)) apply(otadata, write);
 }
 
 class FallbackBothRollbackSettings : public ::testing::TestWithParam<bool> {};
@@ -124,30 +130,49 @@ TEST(OtaSlotModel, CheckRunningSlotClassifiesEveryOtadataState) {
   EXPECT_EQ(checkRunningSlot(ownValid, 0), SlotCheck::FellBack);
 }
 
-TEST(OtaSlotModel, PlanBootArmsOnlyAnUnconfirmedColdBootWithAnImageInTheOtherSlot) {
+TEST(OtaSlotModel, PlanBootArmsOnlyAnUnconfirmedColdBoot) {
   Otadata ownNew = {entry(1, kOtaImgValid), entry(2, kOtaImgNew)};
-  EXPECT_TRUE(planBoot(ownNew, 1, false, true).selectOtherSlot);
-  EXPECT_TRUE(planBoot(ownNew, 1, false, true).confirmAfterHome);
+  EXPECT_TRUE(planBoot(ownNew, 1, false).armFallback);
+  EXPECT_TRUE(planBoot(ownNew, 1, false).confirmAfterHome);
 
-  const BootPlan deepSleep = planBoot(ownNew, 1, true, true);
-  EXPECT_FALSE(deepSleep.selectOtherSlot);
+  const BootPlan deepSleep = planBoot(ownNew, 1, true);
+  EXPECT_FALSE(deepSleep.armFallback);
   EXPECT_TRUE(deepSleep.confirmAfterHome);
 
-  const BootPlan noImage = planBoot(ownNew, 1, false, false);
-  EXPECT_FALSE(noImage.selectOtherSlot);
-  EXPECT_TRUE(noImage.confirmAfterHome);
-
   Otadata ownValid = {entry(1, kOtaImgValid), entry(2, kOtaImgValid)};
-  const BootPlan confirmed = planBoot(ownValid, 1, false, true);
-  EXPECT_FALSE(confirmed.selectOtherSlot);
+  const BootPlan confirmed = planBoot(ownValid, 1, false);
+  EXPECT_FALSE(confirmed.armFallback);
   EXPECT_FALSE(confirmed.confirmAfterHome);
 
-  const BootPlan fellBack = planBoot(ownValid, 0, false, true);
-  EXPECT_FALSE(fellBack.selectOtherSlot);
+  const BootPlan fellBack = planBoot(ownValid, 0, false);
+  EXPECT_FALSE(fellBack.armFallback);
   EXPECT_TRUE(fellBack.confirmAfterHome);
 
   Otadata blank = {blankEntry(), blankEntry()};
-  EXPECT_TRUE(planBoot(blank, 0, false, true).selectOtherSlot);
+  EXPECT_TRUE(planBoot(blank, 0, false).armFallback);
+}
+
+TEST(OtaSlotModel, KeepRunningSlotReselectsTheRunningSlotAsNew) {
+  // Armed: the active entry selects the other slot.
+  Otadata armed = {entry(3, kOtaImgValid), entry(2, kPendingVerify)};
+  EntryWrite write{};
+  ASSERT_TRUE(planKeepRunningSlot(armed, 1, write));
+  EXPECT_EQ(write.sector, 1u);
+  EXPECT_EQ(write.entry.ota_seq, 4u);
+  EXPECT_EQ(write.entry.ota_state, kOtaImgNew);
+
+  // Pending verify under rollback: rewritten in place, the other sector keeps its entry.
+  Otadata pending = {entry(3, kOtaImgValid), entry(4, kPendingVerify)};
+  ASSERT_TRUE(planKeepRunningSlot(pending, 1, write));
+  EXPECT_EQ(write.sector, 1u);
+  EXPECT_EQ(write.entry.ota_seq, 4u);
+  EXPECT_EQ(write.entry.ota_state, kOtaImgNew);
+  EXPECT_EQ(write.entry.crc, computeSeqCrc(4));
+
+  Otadata ownNew = {entry(3, kOtaImgValid), entry(4, kOtaImgNew)};
+  EXPECT_FALSE(planKeepRunningSlot(ownNew, 1, write));
+  Otadata ownValid = {entry(3, kOtaImgValid), entry(4, kOtaImgValid)};
+  EXPECT_FALSE(planKeepRunningSlot(ownValid, 1, write));
 }
 
 TEST_P(FallbackBothRollbackSettings, CrashBeforeHomeBootsTheOtherSlotOnEveryLaterReset) {
@@ -156,7 +181,7 @@ TEST_P(FallbackBothRollbackSettings, CrashBeforeHomeBootsTheOtherSlotOnEveryLate
   Otadata otadata = {entry(1, kOtaImgValid), entry(2, kOtaImgNew)};
   ASSERT_EQ(bootloaderSelect(otadata, rollback), 1u);
   const BootPlan plan = forkSetup(otadata, 1);
-  EXPECT_TRUE(plan.selectOtherSlot);
+  EXPECT_TRUE(plan.armFallback);
 
   // The fork crashes before Home renders.
   EXPECT_EQ(bootloaderSelect(otadata, rollback), 0u);
@@ -175,7 +200,7 @@ TEST_P(FallbackBothRollbackSettings, HomeRenderKeepsTheForkSelected) {
   for (int boot = 0; boot < 3; ++boot) {
     ASSERT_EQ(bootloaderSelect(otadata, rollback), 1u);
     const BootPlan next = forkSetup(otadata, 1);
-    EXPECT_FALSE(next.selectOtherSlot);
+    EXPECT_FALSE(next.armFallback);
     EXPECT_FALSE(next.confirmAfterHome);
   }
 }
@@ -185,10 +210,52 @@ TEST_P(FallbackBothRollbackSettings, BlankOtadataAfterUsbFlashArmsAndConfirms) {
   Otadata otadata = {blankEntry(), blankEntry()};
   ASSERT_EQ(bootloaderSelect(otadata, rollback), 0u);
   const BootPlan plan = forkSetup(otadata, 0);
-  ASSERT_TRUE(plan.selectOtherSlot);
+  ASSERT_TRUE(plan.armFallback);
   forkHomeRendered(otadata, 0, plan);
   EXPECT_EQ(bootloaderSelect(otadata, rollback), 0u);
   EXPECT_EQ(checkRunningSlot(otadata, 0), SlotCheck::Confirmed);
+}
+
+TEST_P(FallbackBothRollbackSettings, SleepBeforeHomeWakesTheForkAndAPreHomeCrashStillFallsBack) {
+  const bool rollback = GetParam();
+  Otadata otadata = {entry(1, kOtaImgValid), entry(2, kOtaImgNew)};
+  ASSERT_EQ(bootloaderSelect(otadata, rollback), 1u);
+  BootPlan plan = forkSetup(otadata, 1);
+  ASSERT_TRUE(plan.armFallback);
+  forkKeepsRunningSlot(otadata, 1, plan);  // ghost wake: back to sleep before Home
+
+  // Wake without fast wake: the bootloader reads otadata again. Sleep twice more.
+  for (int wake = 0; wake < 2; ++wake) {
+    ASSERT_EQ(bootloaderSelect(otadata, rollback), 1u);
+    plan = forkSetup(otadata, 1, /*deepSleepWake=*/true);
+    EXPECT_FALSE(plan.armFallback);
+    forkKeepsRunningSlot(otadata, 1, plan);
+  }
+
+  // The fork crashes before Home on the next wake and on every later boot.
+  ASSERT_EQ(bootloaderSelect(otadata, rollback), 1u);
+  forkSetup(otadata, 1, /*deepSleepWake=*/true);
+  uint32_t booted = bootloaderSelect(otadata, rollback);
+  if (booted == 1u) {
+    // Rollback off: the panic reset is a cold boot, so it arms again.
+    forkSetup(otadata, 1);
+    booted = bootloaderSelect(otadata, rollback);
+  }
+  EXPECT_EQ(booted, 0u);
+  EXPECT_EQ(bootloaderSelect(otadata, rollback), 0u);
+}
+
+TEST_P(FallbackBothRollbackSettings, SleepBeforeHomeThenHomeConfirms) {
+  const bool rollback = GetParam();
+  Otadata otadata = {entry(1, kOtaImgValid), entry(2, kOtaImgNew)};
+  ASSERT_EQ(bootloaderSelect(otadata, rollback), 1u);
+  BootPlan plan = forkSetup(otadata, 1);
+  forkKeepsRunningSlot(otadata, 1, plan);
+  ASSERT_EQ(bootloaderSelect(otadata, rollback), 1u);
+  plan = forkSetup(otadata, 1, /*deepSleepWake=*/true);
+  forkHomeRendered(otadata, 1, plan);
+  EXPECT_EQ(checkRunningSlot(otadata, 1), SlotCheck::Confirmed);
+  EXPECT_EQ(bootloaderSelect(otadata, rollback), 1u);
 }
 
 INSTANTIATE_TEST_SUITE_P(Rollback, FallbackBothRollbackSettings, ::testing::Bool());
@@ -205,20 +272,121 @@ TEST(OtaSlotModel, NewFallbackEntryIsAbortedWhenRollbackIsOn) {
 
 namespace {
 
-std::vector<uint8_t> appImage(uint16_t chip, const std::vector<uint32_t>& segmentLens, bool shaAppended) {
+// Plain SHA-256 (FIPS 180-4), so the image tests check real digests.
+class Sha256 {
+ public:
+  Sha256() { reset(); }
+  void reset() {
+    static const uint32_t init[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                                     0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+    std::memcpy(h_, init, sizeof(h_));
+    len_ = 0;
+    used_ = 0;
+  }
+  void update(const uint8_t* data, size_t len) {
+    for (size_t i = 0; i < len; ++i) {
+      block_[used_++] = data[i];
+      if (used_ == 64) {
+        compress();
+        used_ = 0;
+      }
+    }
+    len_ += len;
+  }
+  void finish(uint8_t (&digest)[32]) {
+    const uint64_t bits = len_ * 8;
+    const uint8_t pad = 0x80;
+    update(&pad, 1);
+    const uint8_t zero = 0;
+    while (used_ != 56) update(&zero, 1);
+    for (int i = 7; i >= 0; --i) {
+      const auto b = static_cast<uint8_t>(bits >> (i * 8));
+      update(&b, 1);
+    }
+    for (int i = 0; i < 8; ++i)
+      for (int j = 0; j < 4; ++j) digest[i * 4 + j] = static_cast<uint8_t>(h_[i] >> (24 - j * 8));
+  }
+
+ private:
+  static uint32_t rotr(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
+  void compress() {
+    static const uint32_t k[64] = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+    uint32_t w[64];
+    for (int i = 0; i < 16; ++i)
+      w[i] = (uint32_t{block_[i * 4]} << 24) | (uint32_t{block_[i * 4 + 1]} << 16) |
+             (uint32_t{block_[i * 4 + 2]} << 8) | block_[i * 4 + 3];
+    for (int i = 16; i < 64; ++i) {
+      const uint32_t s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+      const uint32_t s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+      w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    uint32_t a = h_[0], b = h_[1], c = h_[2], d = h_[3], e = h_[4], f = h_[5], g = h_[6], h = h_[7];
+    for (int i = 0; i < 64; ++i) {
+      const uint32_t t1 = h + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ((e & f) ^ (~e & g)) + k[i] + w[i];
+      const uint32_t t2 = (rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
+      h = g;
+      g = f;
+      f = e;
+      e = d + t1;
+      d = c;
+      c = b;
+      b = a;
+      a = t1 + t2;
+    }
+    h_[0] += a;
+    h_[1] += b;
+    h_[2] += c;
+    h_[3] += d;
+    h_[4] += e;
+    h_[5] += f;
+    h_[6] += g;
+    h_[7] += h;
+  }
+
+  uint32_t h_[8];
+  uint8_t block_[64];
+  uint64_t len_;
+  size_t used_;
+};
+
+std::vector<uint8_t> appImage(uint16_t chip, const std::vector<uint32_t>& segmentLens, bool shaAppended,
+                              uint32_t firstAddress = 0x3C000020) {
   std::vector<uint8_t> image(24, 0);
   image[0] = 0xE9;
   image[1] = static_cast<uint8_t>(segmentLens.size());
   std::memcpy(&image[12], &chip, sizeof(chip));
   image[23] = shaAppended ? 1 : 0;
+  uint8_t checksum = 0xEF;
+  uint32_t address = firstAddress;
   for (const uint32_t len : segmentLens) {
     uint8_t seg[8] = {};
+    std::memcpy(seg, &address, sizeof(address));
     std::memcpy(seg + 4, &len, sizeof(len));
     image.insert(image.end(), seg, seg + 8);
-    image.insert(image.end(), len, 0x5A);
+    for (uint32_t i = 0; i < len; ++i) {
+      const auto b = static_cast<uint8_t>(i * 7 + len);
+      image.push_back(b);
+      checksum ^= b;
+    }
+    address = 0x40374000;
   }
   image.resize((image.size() + 16) & ~static_cast<size_t>(15), 0);
-  if (shaAppended) image.resize(image.size() + 32, 0);
+  image.back() = checksum;
+  if (shaAppended) {
+    Sha256 sha;
+    sha.update(image.data(), image.size());
+    uint8_t digest[32];
+    sha.finish(digest);
+    image.insert(image.end(), digest, digest + 32);
+  }
   return image;
 }
 
@@ -230,17 +398,70 @@ bool readVector(uint32_t offset, void* dst, uint32_t len, void* ctx) {
 }
 
 bool holds(std::vector<uint8_t> slot, uint32_t slotSize, uint16_t chip = kChipS3) {
-  return slotHoldsAppImage(readVector, &slot, slotSize, chip);
+  Sha256 sha;
+  const ImageHasher hasher{&sha,
+                           [](void* ctx, const uint8_t* data, uint32_t len) {
+                             static_cast<Sha256*>(ctx)->update(data, len);
+                             return true;
+                           },
+                           [](void* ctx, uint8_t (&digest)[32]) {
+                             static_cast<Sha256*>(ctx)->finish(digest);
+                             return true;
+                           }};
+  uint8_t buf[64];  // smaller than a segment, so the chunk loop runs
+  slot.resize(std::max<size_t>(slot.size(), slotSize), 0xFF);
+  return slotHoldsAppImage(readVector, &slot, slotSize, chip, hasher, buf, sizeof(buf));
 }
 
 }  // namespace
 
+TEST(OtaSlotModel, Sha256MatchesTheFipsVector) {
+  Sha256 sha;
+  const uint8_t abc[] = {'a', 'b', 'c'};
+  sha.update(abc, sizeof(abc));
+  uint8_t digest[32];
+  sha.finish(digest);
+  const uint8_t expected[4] = {0xba, 0x78, 0x16, 0xbf};
+  EXPECT_EQ(std::memcmp(digest, expected, sizeof(expected)), 0);
+  EXPECT_EQ(digest[31], 0xad);
+}
+
 TEST(OtaSlotModel, SlotImageCheckAcceptsAWellFormedImage) {
   const auto image = appImage(kChipS3, {100, 4096, 7}, true);
   EXPECT_TRUE(holds(image, static_cast<uint32_t>(image.size())));
+  EXPECT_TRUE(holds(image, 0x10000));  // erased flash after the image
   EXPECT_TRUE(holds(appImage(kChipS3, {64}, false), 0x1000));
+  EXPECT_TRUE(holds(appImage(kChipS3, {64}, true, 0x42000020), 0x1000));
 }
 
+TEST(OtaSlotModel, SlotImageCheckRejectsCorruptChecksumHashAndFirstSegment) {
+  const auto image = appImage(kChipS3, {100, 4096, 7}, true);
+  const auto slotSize = static_cast<uint32_t>(image.size());
+
+  auto segmentByte = image;
+  segmentByte[24 + 8 + 50] ^= 0x01;  // also flips the checksum: caught there first
+  EXPECT_FALSE(holds(segmentByte, slotSize));
+
+  auto twoBytes = image;  // checksum still matches, only the hash catches it
+  twoBytes[24 + 8 + 50] ^= 0x01;
+  twoBytes[24 + 8 + 51] ^= 0x01;
+  EXPECT_FALSE(holds(twoBytes, slotSize));
+
+  auto checksumByte = image;
+  checksumByte[image.size() - 33] ^= 0x01;
+  EXPECT_FALSE(holds(checksumByte, slotSize));
+
+  auto trailer = image;
+  trailer[image.size() - 1] ^= 0x01;
+  EXPECT_FALSE(holds(trailer, slotSize));
+
+  auto header = image;
+  header[2] ^= 0x01;  // flash mode byte: covered only by the hash
+  EXPECT_FALSE(holds(header, slotSize));
+
+  EXPECT_FALSE(holds(appImage(kChipS3, {64}, true, 0x3FC9E100), 0x1000));  // DRAM first
+  EXPECT_FALSE(holds(appImage(kChipS3, {64}, true, 0x40374000), 0x1000));  // IRAM first
+}
 TEST(OtaSlotModel, SlotImageCheckRejectsErasedWrongChipAndTruncatedSlots) {
   EXPECT_FALSE(holds(std::vector<uint8_t>(4096, 0xFF), 4096));
   EXPECT_FALSE(holds(appImage(5, {100}, true), 4096));

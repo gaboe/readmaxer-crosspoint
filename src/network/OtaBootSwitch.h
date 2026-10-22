@@ -23,11 +23,17 @@ namespace ota_boot {
 // Returns true on success.
 bool switchTo(const esp_partition_t* dest, uint32_t state = kOtaImgNew);
 
-// Boot-loop fallback. Call first in setup(), after the power latch. While the
-// running slot is not selected as VALID, it selects the other slot (when that
-// slot holds an app image), so a crash before Home boots the other slot. Skipped
-// on a deep-sleep wake. Does not log: Serial is not up yet.
+// Boot-loop fallback, X4 Pro only. Call first in setup(), after the power
+// latch. While the running slot is not selected as VALID, it selects the other
+// slot (when a full image check of that slot passes), so a crash before Home
+// boots the other slot. Skipped on a deep-sleep wake. Does not log: Serial is
+// not up yet.
 void armBootFallback();
+
+// Call before every deliberate sleep or idle that can come before Home. While
+// confirmation is pending, it selects the running slot as NEW, so the next wake
+// returns here and the next cold boot arms the fallback again.
+void keepRunningSlot();
 
 // Selects the running slot as VALID again and then cancels IDF rollback. Call
 // once Home has rendered, and before overwriting the other slot. Returns false

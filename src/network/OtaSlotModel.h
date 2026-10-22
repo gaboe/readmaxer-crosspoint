@@ -55,21 +55,40 @@ SlotCheck checkRunningSlot(const SelectEntry (&entries)[kEntrySectors], uint32_t
 
 struct BootPlan {
   bool confirmAfterHome;  // select the running slot as VALID once Home has rendered
-  bool selectOtherSlot;   // select the other slot now, so a crash before Home boots it
+  bool armFallback;       // select the other slot now if it holds a verified image, so a crash before Home boots it
 };
 
 // The fallback decision for one boot. The other slot is selected as VALID
 // rather than NEW: a bootloader with rollback on aborts a NEW entry whose image
 // never marks itself valid, and VALID boots under either rollback setting.
-BootPlan planBoot(const SelectEntry (&entries)[kEntrySectors], uint32_t runningSlot, bool deepSleepWake,
-                  bool otherSlotHoldsImage);
+BootPlan planBoot(const SelectEntry (&entries)[kEntrySectors], uint32_t runningSlot, bool deepSleepWake);
+
+// The write that makes the next boot return to the running slot before a
+// deliberate sleep or idle while confirmation is pending, or false when none is
+// needed. The running slot is selected as NEW, not VALID: the next cold boot
+// arms the fallback again, and a bootloader with rollback on turns NEW into
+// PENDING_VERIFY and aborts it after a crash. When the active entry already
+// selects the running slot, its sector is rewritten in place, so the other
+// sector keeps the other slot's entry as the bootloader's fallback.
+bool planKeepRunningSlot(const SelectEntry (&entries)[kEntrySectors], uint32_t runningSlot, EntryWrite& write);
 
 // Reads `len` bytes at `offset` of a slot. Returns false on a read error.
 using SlotReader = bool (*)(uint32_t offset, void* dst, uint32_t len, void* ctx);
 
-// Header-level check that a slot holds an app image for `chipId`: magic,
-// segment count, chip id, and a segment table plus padding and SHA trailer that
-// fit inside `slotSize`. It does not hash the segments; the bootloader does.
-bool slotHoldsAppImage(SlotReader read, void* ctx, uint32_t slotSize, uint16_t chipId);
+// SHA-256 supplied by the caller (mbedtls on the device), so the host tests can
+// drive the image check. The caller starts the hash before the check.
+struct ImageHasher {
+  void* ctx;
+  bool (*update)(void* ctx, const uint8_t* data, uint32_t len);
+  bool (*finish)(void* ctx, uint8_t (&digest)[32]);
+};
+
+// Full check that a slot holds an ESP32-S3 app image for `chipId`, as the
+// bootloader checks it before it boots the image: magic, chip id, segment
+// count, a first segment in flash-mapped DROM or IROM, every segment inside
+// `slotSize`, the XOR checksum at the end of the 16-byte padding, and the
+// appended SHA-256 over all bytes before it. `buf` holds the segment reads.
+bool slotHoldsAppImage(SlotReader read, void* ctx, uint32_t slotSize, uint16_t chipId, const ImageHasher& hasher,
+                       uint8_t* buf, uint32_t bufLen);
 
 }  // namespace ota_boot

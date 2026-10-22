@@ -510,6 +510,7 @@ void enterDeepSleep(bool fromTimeout = false) {
   halTiltSensor.deepSleep();
   display.deepSleep();
   Storage.prepareForDeepSleep();
+  ota_boot::keepRunningSlot();
   LOG_DBG("MAIN", "Entering deep sleep");
 
   powerManager.startDeepSleep(gpio, wakeOnHeldButton);
@@ -631,6 +632,7 @@ void setup() {
   // We need 6 open files concurrently when parsing a new chapter
   if (!Storage.begin()) {
     LOG_ERR("MAIN", "SD card initialization failed");
+    ota_boot::keepRunningSlot();
     setupDisplayAndFonts(isSilentReboot);
     activityManager.goToFullScreenMessage("SD card error", EpdFontFamily::BOLD);
     return;
@@ -701,6 +703,7 @@ void setup() {
           !(FREEINK_DEVICE_PICCO && gpio.isUsbConnected())) {
         LOG_DBG("MAIN", "Power-button wake not held through verification, sleeping");
         Storage.prepareForDeepSleep();
+        ota_boot::keepRunningSlot();
         powerManager.startDeepSleep(gpio);
       }
       wakePowerReleasePending = true;
@@ -720,6 +723,7 @@ void setup() {
       break;
 #else
       Storage.prepareForDeepSleep();
+      ota_boot::keepRunningSlot();
       powerManager.startDeepSleep(gpio);
       break;
 #endif
