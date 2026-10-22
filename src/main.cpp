@@ -45,6 +45,7 @@
 #include "activities/settings/SdFirmwareUpdateActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "network/OtaBootSwitch.h"
 #include "platform/UsbSerialJtagHandoff.h"
 #include "util/ButtonNavigator.h"
 #include "util/PluginEvents.h"
@@ -74,6 +75,10 @@ namespace {
 constexpr unsigned long X4PRO_POWER_DOUBLE_CLICK_MS = 500;
 constexpr unsigned long X4PRO_POWER_CLICK_MAX_HOLD_MS = 300;
 }  // namespace
+
+#if FREEINK_DEVICE_X4PRO
+extern "C" bool verifyRollbackLater() { return true; }
+#endif
 
 // A wake hold must never become an in-app power-button action.  Boot may continue
 // while the button is held; swallow the one release that ends that wake gesture.
@@ -556,6 +561,9 @@ void setupDisplayAndFonts(bool seamless = false) {
 }
 
 void setup() {
+#if FREEINK_DEVICE_X4PRO
+  ota_boot::selectFallbackForUnconfirmedX4Pro();
+#endif
   BoardConfig::holdPowerRails();
 
 #ifdef ENABLE_SERIAL_LOG

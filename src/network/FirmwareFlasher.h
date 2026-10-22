@@ -31,6 +31,8 @@ enum class Result {
   READ_FAIL,
   ERASE_FAIL,
   WRITE_FAIL,
+  READBACK_FAIL,
+  READBACK_MISMATCH,
   OTADATA_FAIL,
 };
 

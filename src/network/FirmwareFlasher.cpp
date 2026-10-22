@@ -63,6 +63,10 @@ const char* resultName(Result r) {
       return "ERASE_FAIL";
     case Result::WRITE_FAIL:
       return "WRITE_FAIL";
+    case Result::READBACK_FAIL:
+      return "READBACK_FAIL";
+    case Result::READBACK_MISMATCH:
+      return "READBACK_MISMATCH";
     case Result::OTADATA_FAIL:
       return "OTADATA_FAIL";
   }
@@ -106,6 +110,28 @@ Result feedHashAndChecksum(HalFile& file, size_t length, uint8_t* xorAccum, mbed
     remaining -= want;
   }
   return Result::OK;
+}
+
+bool hashPartition(const esp_partition_t* partition, size_t length, uint8_t* buffer, uint8_t digest[SHA_TRAILER]) {
+  mbedtls_sha256_context sha;
+  mbedtls_sha256_init(&sha);
+  if (mbedtls_sha256_starts(&sha, /*is224=*/0) != 0) {
+    mbedtls_sha256_free(&sha);
+    return false;
+  }
+  size_t offset = 0;
+  while (offset < length) {
+    const size_t amount = std::min<size_t>(CHUNK, length - offset);
+    if (esp_partition_read(partition, offset, buffer, amount) != ESP_OK ||
+        mbedtls_sha256_update(&sha, buffer, amount) != 0) {
+      mbedtls_sha256_free(&sha);
+      return false;
+    }
+    offset += amount;
+  }
+  const int result = mbedtls_sha256_finish(&sha, digest);
+  mbedtls_sha256_free(&sha);
+  return result == 0;
 }
 }  // namespace
 
@@ -311,6 +337,14 @@ Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx, boo
     return Result::OOM;
   }
 
+  mbedtls_sha256_context sourceSha;
+  mbedtls_sha256_init(&sourceSha);
+  if (mbedtls_sha256_starts(&sourceSha, /*is224=*/0) != 0) {
+    mbedtls_sha256_free(&sourceSha);
+    file.close();
+    return Result::READ_FAIL;
+  }
+
   // Interleave erase + write so the progress bar advances 0→100% smoothly
   // rather than stalling for several seconds during a single up-front erase.
   size_t streamPos = 0;
@@ -324,6 +358,7 @@ Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx, boo
         LOG_ERR("FLASH", "erase @%u (len=%u) failed", static_cast<unsigned>(streamPos),
                 static_cast<unsigned>(eraseLen));
         file.close();
+        mbedtls_sha256_free(&sourceSha);
         return Result::ERASE_FAIL;
       }
       erasedUpto = streamPos + eraseLen;
@@ -334,11 +369,18 @@ Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx, boo
     if (read <= 0 || static_cast<size_t>(read) != want) {
       LOG_ERR("FLASH", "read @%u: got=%d want=%u", static_cast<unsigned>(streamPos), read, static_cast<unsigned>(want));
       file.close();
+      mbedtls_sha256_free(&sourceSha);
+      return Result::READ_FAIL;
+    }
+    if (mbedtls_sha256_update(&sourceSha, buffer.get(), want) != 0) {
+      file.close();
+      mbedtls_sha256_free(&sourceSha);
       return Result::READ_FAIL;
     }
     if (esp_partition_write(dest, streamPos, buffer.get(), want) != ESP_OK) {
       LOG_ERR("FLASH", "write @%u failed", static_cast<unsigned>(streamPos));
       file.close();
+      mbedtls_sha256_free(&sourceSha);
       return Result::WRITE_FAIL;
     }
     streamPos += want;
@@ -346,6 +388,22 @@ Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx, boo
     delay(1);
   }
   file.close();
+
+  uint8_t sourceDigest[SHA_TRAILER];
+  if (mbedtls_sha256_finish(&sourceSha, sourceDigest) != 0) {
+    mbedtls_sha256_free(&sourceSha);
+    return Result::READ_FAIL;
+  }
+  mbedtls_sha256_free(&sourceSha);
+  uint8_t readbackDigest[SHA_TRAILER];
+  if (!hashPartition(dest, firmwareSize, buffer.get(), readbackDigest)) {
+    LOG_ERR("FLASH", "slot readback failed");
+    return Result::READBACK_FAIL;
+  }
+  if (std::memcmp(sourceDigest, readbackDigest, sizeof(sourceDigest)) != 0) {
+    LOG_ERR("FLASH", "slot readback SHA-256 mismatch");
+    return Result::READBACK_MISMATCH;
+  }
 
   if (!ota_boot::switchTo(dest)) {
     LOG_ERR("FLASH", "otadata switch failed");

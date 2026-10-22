@@ -26,7 +26,6 @@
 #include "LanguageSelectActivity.h"
 #include "MappedInputManager.h"
 #include "OpdsServerListActivity.h"
-#include "OtaUpdateActivity.h"
 #include "SdCardFontSystem.h"
 #include "SdFirmwareUpdateActivity.h"
 #include "SettingsList.h"
@@ -138,12 +137,7 @@ void SettingsActivity::rebuildSettings() {
   addAction(SettingsSection::Network, StrId::STR_OPDS_SERVERS, SettingAction::OPDSBrowser);
   addAction(SettingsSection::Network, StrId::STR_PLUGINS, SettingAction::Plugins);
 
-  // OTA fetches this board's own release asset (see OtaUpdater); boards whose
-  // asset isn't published yet just report no update available. The Picco's
-  // stock layout has one app slot (partitions_picco.csv), so it cannot update
-  // itself either way.
   if (!BoardConfig::isPicco()) {
-    addAction(SettingsSection::General, StrId::STR_CHECK_UPDATES, SettingAction::CheckForUpdates);
     addAction(SettingsSection::General, StrId::STR_SD_FIRMWARE_UPDATE, SettingAction::SdFirmwareUpdate);
   }
   addAction(SettingsSection::General, StrId::STR_ABOUT, SettingAction::About);
@@ -345,9 +339,6 @@ void SettingsActivity::toggleSelectedSetting() {
       }
       case SettingAction::ClearCache:
         startActivityForResult(std::make_unique<ClearCacheActivity>(renderer, mappedInput), resultHandler);
-        break;
-      case SettingAction::CheckForUpdates:
-        startActivityForResult(std::make_unique<OtaUpdateActivity>(renderer, mappedInput), resultHandler);
         break;
       case SettingAction::SdFirmwareUpdate:
         startActivityForResult(std::make_unique<SdFirmwareUpdateActivity>(renderer, mappedInput), resultHandler);

@@ -25,6 +25,7 @@
 #include "RecentBooksStore.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "network/OtaBootSwitch.h"
 
 int HomeActivity::getMenuItemCount() const {
   int count = 4;  // File Browser, Library, File transfer, Settings
@@ -493,6 +494,9 @@ void HomeActivity::render(RenderLock&&) {
     }
     if (!firstRenderDone) {
       firstRenderDone = true;
+#if FREEINK_DEVICE_X4PRO
+      ota_boot::confirmRunningX4ProAfterHome();
+#endif
       requestUpdate();
     } else if (!recentsLoaded && !recentsLoading) {
       loadRecentCovers(CoverGridHomeUi::THUMB_HEIGHT);
@@ -557,6 +561,9 @@ void HomeActivity::render(RenderLock&&) {
 
   if (!firstRenderDone) {
     firstRenderDone = true;
+#if FREEINK_DEVICE_X4PRO
+    ota_boot::confirmRunningX4ProAfterHome();
+#endif
     requestUpdate();
   } else if (!recentsLoaded && !recentsLoading) {
     recentsLoading = true;
