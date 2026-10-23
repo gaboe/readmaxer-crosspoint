@@ -113,7 +113,7 @@ bool slotHoldsAppImage(SlotReader read, void* ctx, uint32_t slotSize, uint16_t c
     uint32_t dataLen;
     std::memcpy(&loadAddress, segmentHeader, sizeof(loadAddress));
     std::memcpy(&dataLen, segmentHeader + 4, sizeof(dataLen));
-    if ((i == 0 && !flashMapped(loadAddress)) || dataLen > slotSize - pos) return false;
+    if ((i == 0 && !flashMapped(loadAddress)) || dataLen % 4 != 0 || dataLen > slotSize - pos) return false;
     for (uint32_t left = dataLen; left > 0;) {
       const uint32_t chunk = left < bufLen ? left : bufLen;
       if (!read(pos, buf, chunk, ctx) || !hasher.update(hasher.ctx, buf, chunk)) return false;
@@ -127,10 +127,11 @@ bool slotHoldsAppImage(SlotReader read, void* ctx, uint32_t slotSize, uint16_t c
   if (slotSize - pos < 16) return false;
   const uint32_t padEnd = (pos + 16u) & ~15u;
   const uint32_t padLen = padEnd - pos;
-  if (!read(pos, buf, padLen, ctx) || buf[padLen - 1] != checksum || !hasher.update(hasher.ctx, buf, padLen)) {
+  // A fallback target must carry the SHA-256 trailer that IDF builds append.
+  if (header[23] == 0 || !read(pos, buf, padLen, ctx) || buf[padLen - 1] != checksum ||
+      !hasher.update(hasher.ctx, buf, padLen)) {
     return false;
   }
-  if (header[23] == 0) return true;
 
   uint8_t stored[kShaTrailer];
   uint8_t computed[kShaTrailer];

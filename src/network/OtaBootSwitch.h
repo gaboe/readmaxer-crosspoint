@@ -30,14 +30,15 @@ bool switchTo(const esp_partition_t* dest, uint32_t state = kOtaImgNew);
 // not up yet.
 void armBootFallback();
 
-// Call before every deliberate sleep or idle that can come before Home. While
-// confirmation is pending, it selects the running slot as NEW, so the next wake
-// returns here and the next cold boot arms the fallback again.
-void keepRunningSlot();
+// Call before every deliberate sleep or idle that can come before Home, and
+// before overwriting the other slot. While confirmation is pending, it selects
+// the running slot as NEW, so the next boot returns here and the next cold boot
+// arms the fallback again. Returns false when the otadata write failed.
+bool keepRunningSlot();
 
 // Selects the running slot as VALID again and then cancels IDF rollback. Call
-// once Home has rendered, and before overwriting the other slot. Returns false
-// when the otadata write failed; the next call retries.
+// once Home has rendered. Returns false when the otadata write failed; the next
+// call retries.
 bool confirmRunningSlot();
 
 // True from armBootFallback() until confirmRunningSlot() succeeds.

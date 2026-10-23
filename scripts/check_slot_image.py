@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Refuse any file that is not a single app image safe to write into an OTA slot.
 
-A Python port of firmware_flash::validateImageFile (src/network/FirmwareFlasher.cpp)
-with two more rules for this fork: a merged image (bootloader at 0x0 or partition
+A Python port of firmware_flash::validateImageFile (src/network/FirmwareFlasher.cpp),
+plus the segment-count and first-segment rules of ota_boot::slotHoldsAppImage, and
+two more rules for this fork: a merged image (bootloader at 0x0 or partition
 table at 0x8000, such as firmware.factory.bin) is refused, and so is an image
 larger than 0x5C0000, which keeps 0x80000 of headroom in a 0x640000 slot.
 
@@ -28,6 +29,7 @@ APP_DESC_MAGIC = 0xABCD5432
 APP_DESC_OFFSET = HEADER_SIZE + SEGMENT_HEADER_SIZE
 BOARD_TAG_MAGIC = b"CROSSPOINT-BOARD-V1:"
 CHIP_ESP32S3 = 9
+MAX_SEGMENTS = 16  # ESP_IMAGE_MAX_SEGMENTS
 
 
 class Refused(Exception):
@@ -41,6 +43,11 @@ def _has_partition_table(data):
         return False
     label = entry[12:28].rstrip(b"\x00")
     return 0 < len(label) and all(0x20 < b < 0x7F for b in label)
+
+
+def _flash_mapped(addr):
+    """ESP32-S3 flash-mapped DROM and IROM, as ota_boot::slotHoldsAppImage checks the first segment."""
+    return 0x3C000000 <= addr < 0x3E000000 or 0x42000000 <= addr < 0x44000000
 
 
 def _scan_board_tags(segment_data):
@@ -75,6 +82,8 @@ def check(data, chip=CHIP_ESP32S3, board=None):
     hash_appended = header[23] != 0
     if image_chip != chip:
         raise Refused(f"wrong chip: image={image_chip} expected={chip}")
+    if not 0 < segment_count <= MAX_SEGMENTS:
+        raise Refused(f"bad segment count {segment_count}")
     if size >= APP_DESC_OFFSET + 4 and struct.unpack_from("<I", data, APP_DESC_OFFSET)[0] != APP_DESC_MAGIC:
         raise Refused("no app descriptor after the first segment header: bootloader at 0x0")
 
@@ -84,7 +93,9 @@ def check(data, chip=CHIP_ESP32S3, board=None):
     for i in range(segment_count):
         if pos + SEGMENT_HEADER_SIZE > size:
             raise Refused(f"segment {i} header overruns EOF at {pos}")
-        data_len = struct.unpack_from("<I", data, pos + 4)[0]
+        load_addr, data_len = struct.unpack_from("<II", data, pos)
+        if i == 0 and not _flash_mapped(load_addr):
+            raise Refused(f"first segment loads to 0x{load_addr:08X}, not flash-mapped DROM or IROM")
         pos += SEGMENT_HEADER_SIZE
         if pos + data_len > size:
             raise Refused(f"segment {i} data overruns EOF ({pos} + {data_len} > {size})")

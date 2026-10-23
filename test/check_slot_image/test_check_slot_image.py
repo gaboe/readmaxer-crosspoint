@@ -15,7 +15,7 @@ _spec.loader.exec_module(checker)
 APP_DESC = struct.pack("<I", checker.APP_DESC_MAGIC)
 
 
-def build_image(segments, chip=9, sha=True):
+def build_image(segments, chip=9, sha=True, first_addr=0x3C000000):
     """A well-formed ESP app image: header, segments, padding with checksum, SHA-256 trailer."""
     header = bytearray(24)
     header[0] = 0xE9
@@ -25,7 +25,7 @@ def build_image(segments, chip=9, sha=True):
     body = bytearray(header)
     checksum = 0xEF
     for i, data in enumerate(segments):
-        body += struct.pack("<II", 0x3C000000 + i * 0x10000, len(data)) + data
+        body += struct.pack("<II", first_addr + i * 0x10000, len(data)) + data
         for b in data:
             checksum ^= b
     pad_end = (len(body) + 16) & ~15
@@ -54,6 +54,14 @@ class CheckSlotImageTest(unittest.TestCase):
         info = checker.check(app_image())
         self.assertEqual(info["chip"], 9)
         self.assertTrue(info["sha_appended"])
+
+    def test_segment_count_above_esp_image_max_is_refused(self):
+        segments = [APP_DESC + bytes(252)] + [bytes(4096)] * 16
+        self.assertIn("bad segment count 17", refused(build_image(segments)))
+
+    def test_first_segment_outside_flash_mapping_is_refused(self):
+        image = build_image([APP_DESC + bytes(252), bytes(70_000)], first_addr=0x40374000)
+        self.assertIn("not flash-mapped", refused(image))
 
     def test_truncated_image_is_refused(self):
         self.assertIn("overruns EOF", refused(app_image()[:100_000]))

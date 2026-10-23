@@ -457,6 +457,15 @@ static bool holdSleepWhileUsbPowered() {
 }
 #endif
 
+// Every deliberate deep sleep goes through here, so a sleep before Home never
+// leaves the boot fallback armed.
+static void sleepNow(const bool wakeOnHeldButton = false) {
+  Storage.prepareForDeepSleep();
+  ota_boot::keepRunningSlot();
+  LOG_DBG("MAIN", "Entering deep sleep");
+  powerManager.startDeepSleep(gpio, wakeOnHeldButton);
+}
+
 // Enter deep sleep mode
 void enterDeepSleep(bool fromTimeout = false) {
   HalPowerManager::Lock powerLock;  // Ensure we are at normal CPU frequency for sleep preparation
@@ -509,11 +518,7 @@ void enterDeepSleep(bool fromTimeout = false) {
 
   halTiltSensor.deepSleep();
   display.deepSleep();
-  Storage.prepareForDeepSleep();
-  ota_boot::keepRunningSlot();
-  LOG_DBG("MAIN", "Entering deep sleep");
-
-  powerManager.startDeepSleep(gpio, wakeOnHeldButton);
+  sleepNow(wakeOnHeldButton);
 }
 
 void setupDisplayAndFonts(bool seamless = false) {
@@ -702,9 +707,7 @@ void setup() {
       if (!wakeHoldVerified && SETTINGS.shortPwrBtn != CrossPointSettings::SHORT_PWRBTN::SLEEP &&
           !(FREEINK_DEVICE_PICCO && gpio.isUsbConnected())) {
         LOG_DBG("MAIN", "Power-button wake not held through verification, sleeping");
-        Storage.prepareForDeepSleep();
-        ota_boot::keepRunningSlot();
-        powerManager.startDeepSleep(gpio);
+        sleepNow();
       }
       wakePowerReleasePending = true;
       break;
@@ -722,9 +725,7 @@ void setup() {
       // the device in a USB-replug boot loop (or sleep right after a flash).
       break;
 #else
-      Storage.prepareForDeepSleep();
-      ota_boot::keepRunningSlot();
-      powerManager.startDeepSleep(gpio);
+      sleepNow();
       break;
 #endif
     case HalGPIO::WakeupReason::AfterFlash:
@@ -788,6 +789,9 @@ void setup() {
   } else if (rebootedFromPanic) {
     // If we rebooted from a panic, go to crash report screen to show the panic info
     activityManager.goToCrashReport();
+  } else if (ota_boot::confirmationPending()) {
+    // This slot waits for Home to confirm it, so no resume target skips Home.
+    activityManager.goHome(HomeMenuItem::NONE, needsWakeRefresh);
   } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_READER &&
              !APP_STATE.openEpubPath.empty()) {
     activityManager.goToReader(APP_STATE.openEpubPath);
@@ -804,10 +808,9 @@ void setup() {
     // openEpubPath + lastSleepFromReader from a prior session.
     activityManager.goHome();
   } else if (APP_STATE.openEpubPath.empty() || !APP_STATE.lastSleepFromReader ||
-             mappedInputManager.isPressed(MappedInputManager::Button::Back) || APP_STATE.readerActivityLoadCount > 0 ||
-             ota_boot::confirmationPending()) {
-    // Boot to home screen if no book is open, last sleep was not from reader, back button is held, reader activity
-    // crashed (indicated by readerActivityLoadCount > 0), or this slot waits for Home to confirm it
+             mappedInputManager.isPressed(MappedInputManager::Button::Back) || APP_STATE.readerActivityLoadCount > 0) {
+    // Boot to home screen if no book is open, last sleep was not from reader, back button is held, or reader activity
+    // crashed (indicated by readerActivityLoadCount > 0)
     activityManager.goHome(HomeMenuItem::NONE, needsWakeRefresh);
   } else {
     // Clear app state to avoid getting into a boot loop if the epub doesn't load

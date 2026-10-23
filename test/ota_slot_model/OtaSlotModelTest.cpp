@@ -427,15 +427,15 @@ TEST(OtaSlotModel, Sha256MatchesTheFipsVector) {
 }
 
 TEST(OtaSlotModel, SlotImageCheckAcceptsAWellFormedImage) {
-  const auto image = appImage(kChipS3, {100, 4096, 7}, true);
+  const auto image = appImage(kChipS3, {100, 4096, 8}, true);
   EXPECT_TRUE(holds(image, static_cast<uint32_t>(image.size())));
   EXPECT_TRUE(holds(image, 0x10000));  // erased flash after the image
-  EXPECT_TRUE(holds(appImage(kChipS3, {64}, false), 0x1000));
+  EXPECT_TRUE(holds(appImage(kChipS3, {64}, true), 0x1000));
   EXPECT_TRUE(holds(appImage(kChipS3, {64}, true, 0x42000020), 0x1000));
 }
 
 TEST(OtaSlotModel, SlotImageCheckRejectsCorruptChecksumHashAndFirstSegment) {
-  const auto image = appImage(kChipS3, {100, 4096, 7}, true);
+  const auto image = appImage(kChipS3, {100, 4096, 8}, true);
   const auto slotSize = static_cast<uint32_t>(image.size());
 
   auto segmentByte = image;
@@ -459,6 +459,8 @@ TEST(OtaSlotModel, SlotImageCheckRejectsCorruptChecksumHashAndFirstSegment) {
   header[2] ^= 0x01;  // flash mode byte: covered only by the hash
   EXPECT_FALSE(holds(header, slotSize));
 
+  EXPECT_FALSE(holds(appImage(kChipS3, {64}, false), 0x1000));             // no SHA-256 trailer
+  EXPECT_FALSE(holds(appImage(kChipS3, {62}, true), 0x1000));              // unaligned segment length
   EXPECT_FALSE(holds(appImage(kChipS3, {64}, true, 0x3FC9E100), 0x1000));  // DRAM first
   EXPECT_FALSE(holds(appImage(kChipS3, {64}, true, 0x40374000), 0x1000));  // IRAM first
 }

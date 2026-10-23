@@ -111,6 +111,7 @@ Result feedHashAndChecksum(HalFile& file, size_t length, uint8_t* xorAccum, mbed
 }
 }  // namespace
 
+// ota_boot::slotHoldsAppImage walks the same format in a flash slot; change them together.
 Result validateImageFile(const char* sdPath, size_t partitionSize) {
   HalFile file;
   if (!Storage.openFileForRead("FLASH", sdPath, file) || !file) {
@@ -324,7 +325,7 @@ Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx) {
 
   // While the boot fallback is armed, otadata selects `dest`. Select the
   // running slot first so an interrupted write never leaves a partial image selected.
-  if (!ota_boot::confirmRunningSlot()) return Result::OTADATA_FAIL;
+  if (!ota_boot::keepRunningSlot()) return Result::OTADATA_FAIL;
 
   HalFile file;
   if (!Storage.openFileForRead("FLASH", sdPath, file) || !file) {

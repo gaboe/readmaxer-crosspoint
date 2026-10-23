@@ -85,9 +85,12 @@ struct ImageHasher {
 
 // Full check that a slot holds an ESP32-S3 app image for `chipId`, as the
 // bootloader checks it before it boots the image: magic, chip id, segment
-// count, a first segment in flash-mapped DROM or IROM, every segment inside
-// `slotSize`, the XOR checksum at the end of the 16-byte padding, and the
-// appended SHA-256 over all bytes before it. `buf` holds the segment reads.
+// count, a first segment in flash-mapped DROM or IROM, 4-byte aligned segment
+// lengths inside `slotSize`, the XOR checksum at the end of the 16-byte
+// padding, and the appended SHA-256 over all bytes before it, which must be
+// present. `buf` holds the segment reads. firmware_flash::validateImageFile and
+// scripts/check_slot_image.py walk the same format for an image file; change
+// them together.
 bool slotHoldsAppImage(SlotReader read, void* ctx, uint32_t slotSize, uint16_t chipId, const ImageHasher& hasher,
                        uint8_t* buf, uint32_t bufLen);
 
