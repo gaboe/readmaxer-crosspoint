@@ -2,7 +2,9 @@
 
 namespace host_tag {
 
-const char TAG[] __attribute__((used)) = "READMAXER-" "HOST-V1;";
+const char TAG[] __attribute__((used)) =
+    "READMAXER-"
+    "HOST-V1;";
 
 void Scanner::feed(const uint8_t* data, size_t len) {
   for (size_t n = 0; n < len; ++n) {
@@ -22,7 +24,7 @@ void Scanner::feed(const uint8_t* data, size_t len) {
 }
 
 Identity classify(bool boardMatched, bool boardMismatch, const Scanner& host, bool guestMarker) {
-  if (boardMatched && !boardMismatch && host.exactlyOne()) return Identity::Host;
+  if (boardMatched && !boardMismatch && host.exactlyOne() && !guestMarker) return Identity::Host;
   if (!host.exactlyOne() && guestMarker) return Identity::Guest;
   if (!boardMatched || boardMismatch) return Identity::WrongBoard;
   return Identity::WrongFork;

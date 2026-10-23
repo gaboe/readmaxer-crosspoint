@@ -19,7 +19,8 @@ class CoverGridHomeUi final : public UiAppHost {
   static constexpr int MAX_BOOKS = 1 + GRID_COLUMNS * GRID_ROWS;
   static_assert(MAX_BOOKS <= HomeCoverCache::MAX_COVERS);
   explicit CoverGridHomeUi(GfxRenderer& renderer);
-  void begin(const std::vector<RecentBook>& books, bool hasOpds, bool hasContinueReading);
+  void begin(const std::vector<RecentBook>& books, bool hasOpds, bool hasContinueReading, bool hasGuest);
+  void setGuest(bool installed) { hasGuest = installed; }
   void refreshCoverPaths();
   void setSelection(int selection) { selected = selection; }
   int selectedAction(const MappedInputManager& input);
@@ -54,11 +55,12 @@ class CoverGridHomeUi final : public UiAppHost {
   int progress = -1;
   bool hasOpds = false;
   bool hasContinueReading = false;
+  bool hasGuest = false;
   char progressText[12]{};
   // Component styles and interaction tables stay off the render task's stack.
   freeink::ui::BookCardProps card;
   freeink::ui::CoverGridProps grid;
   freeink::ui::Rect gridBounds{};
   freeink::ui::TabBarProps tabs;
-  std::array<freeink::ui::TabItem, 5> tabItems;
+  std::array<freeink::ui::TabItem, 6> tabItems;
 };

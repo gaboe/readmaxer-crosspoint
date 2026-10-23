@@ -23,6 +23,16 @@ bool entryUsable(const SelectEntry& e) {
   return e.ota_seq != kBlankSeq && e.crc == computeSeqCrc(e.ota_seq) && e.ota_state != kOtaImgInvalid &&
          e.ota_state != kOtaImgAborted;
 }
+
+int protectedSector(const SelectEntry (&entries)[kEntrySectors], uint32_t runningSlot) {
+  int result = -1;
+  for (int i = 0; i < static_cast<int>(kEntrySectors); ++i) {
+    if (entryUsable(entries[i]) && entries[i].ota_state == kOtaImgValid && entrySlot(entries[i]) == runningSlot &&
+        (result < 0 || entries[i].ota_seq > entries[result].ota_seq))
+      result = i;
+  }
+  return result;
+}
 }  // namespace
 
 uint32_t computeSeqCrc(uint32_t seq) {
@@ -47,19 +57,22 @@ int activeEntry(const SelectEntry (&entries)[kEntrySectors]) {
 
 uint32_t entrySlot(const SelectEntry& entry) { return (entry.ota_seq - 1u) % kSlotCount; }
 
-EntryWrite planSelect(const SelectEntry (&entries)[kEntrySectors], uint32_t slot, uint32_t state) {
+bool planSelect(const SelectEntry (&entries)[kEntrySectors], uint32_t runningSlot, uint32_t slot, uint32_t state,
+                EntryWrite& write) {
   const int active = activeEntry(entries);
   const uint32_t activeSeq = active < 0 ? 0 : entries[active].ota_seq;
-  uint32_t seq = activeSeq + 1u;
-  while ((seq - 1u) % kSlotCount != slot % kSlotCount) ++seq;
+  const uint32_t step =
+      active < 0 ? slot % kSlotCount + 1u : (entrySlot(entries[active]) == slot % kSlotCount ? 2u : 1u);
+  if (activeSeq > kBlankSeq - 1u - step) return false;
+  const uint32_t seq = activeSeq + step;
 
-  EntryWrite write{};
-  write.sector = active == 0 ? 1u : 0u;
+  const int protectedIndex = protectedSector(entries, runningSlot);
+  write.sector = protectedIndex >= 0 ? 1u - protectedIndex : (active == 0 ? 1u : 0u);
   write.entry.ota_seq = seq;
   std::memset(write.entry.seq_label, 0xFF, sizeof(write.entry.seq_label));
   write.entry.ota_state = state;
   write.entry.crc = computeSeqCrc(seq);
-  return write;
+  return true;
 }
 
 SlotCheck checkRunningSlot(const SelectEntry (&entries)[kEntrySectors], uint32_t runningSlot) {
@@ -74,18 +87,18 @@ BootPlan planBoot(const SelectEntry (&entries)[kEntrySectors], uint32_t runningS
   return BootPlan{check != SlotCheck::Confirmed, check == SlotCheck::Unconfirmed && !deepSleepWake};
 }
 
-bool planKeepRunningSlot(const SelectEntry (&entries)[kEntrySectors], uint32_t runningSlot, EntryWrite& write) {
+KeepPlan planKeepRunningSlot(const SelectEntry (&entries)[kEntrySectors], uint32_t runningSlot, EntryWrite& write) {
   const int active = activeEntry(entries);
   if (active < 0 || entrySlot(entries[active]) != runningSlot) {
-    write = planSelect(entries, runningSlot, kOtaImgNew);
-    return true;
+    return planSelect(entries, runningSlot, runningSlot, kOtaImgNew, write) ? KeepPlan::Write : KeepPlan::Unsafe;
   }
   const uint32_t state = entries[active].ota_state;
-  if (state == kOtaImgNew || state == kOtaImgValid) return false;
+  if (state == kOtaImgNew || state == kOtaImgValid) return KeepPlan::NoWrite;
+  if (protectedSector(entries, runningSlot) == active) return KeepPlan::Unsafe;
   write.sector = static_cast<uint32_t>(active);
   write.entry = entries[active];
   write.entry.ota_state = kOtaImgNew;
-  return true;
+  return KeepPlan::Write;
 }
 
 bool slotHoldsAppImage(SlotReader read, void* ctx, uint32_t slotSize, uint16_t chipId, const ImageHasher& hasher,

@@ -91,6 +91,7 @@ TEST(GuestSlot, HostMarkerRequiresExactlyOneOccurrence) {
   scanner.feed(reinterpret_cast<const uint8_t*>(tag + 3), std::strlen(tag) - 3);
   EXPECT_TRUE(scanner.exactlyOne());
   EXPECT_EQ(host_tag::classify(true, false, scanner, false), host_tag::Identity::Host);
+  EXPECT_NE(host_tag::classify(true, false, scanner, true), host_tag::Identity::Host);
   EXPECT_EQ(host_tag::classify(false, false, scanner, true), host_tag::Identity::WrongBoard);
   EXPECT_EQ(host_tag::classify(true, true, scanner, false), host_tag::Identity::WrongBoard);
   scanner.feed(reinterpret_cast<const uint8_t*>(tag), std::strlen(tag));

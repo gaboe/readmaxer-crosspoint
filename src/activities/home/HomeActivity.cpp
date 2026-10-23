@@ -242,7 +242,7 @@ void HomeActivity::onEnter() {
   if (guest.image.installed) guestLabel = std::string(tr(STR_READMAXER)) + " " + guest.image.version;
 
   const auto& metrics = UITheme::getInstance().getMetrics();
-  if (UITheme::getInstance().hasCoverGridHome() && !guest.image.installed) {
+  if (UITheme::getInstance().hasCoverGridHome()) {
     // Screen-lifetime interaction tables and component properties exceed the stack budget.
     coverGridUi = makeUniqueNoThrow<CoverGridHomeUi>(renderer);
     if (!coverGridUi) LOG_ERR("HOME", "OOM: cover grid UI; using standard home");
@@ -252,7 +252,7 @@ void HomeActivity::onEnter() {
   if (coverGridUi) {
     fillCoverGridFromLibrary();
     resolveGridCoverPaths();
-    coverGridUi->begin(recentBooks, hasLibrarySlot(), hasContinueReading);
+    coverGridUi->begin(recentBooks, hasLibrarySlot(), hasContinueReading, guest.image.installed);
   }
 
   const auto base = static_cast<int>(recentBooks.size());
@@ -495,7 +495,12 @@ void HomeActivity::render(RenderLock&&) {
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     renderer.displayBuffer(cleanInitialRefresh && !firstRenderDone ? HalDisplay::HALF_REFRESH
                                                                    : HalDisplay::FAST_REFRESH);
-    ota_boot::confirmRunningSlot();
+    if (ota_boot::confirmationPending() && ota_boot::confirmRunningSlot()) {
+      guest = guest_slot::inspect();
+      if (guest.image.installed) guestLabel = std::string(tr(STR_READMAXER)) + " " + guest.image.version;
+      coverGridUi->setGuest(guest.image.installed);
+      requestUpdate();
+    }
     // Slot heights are recorded during the draw above; a change (first layout
     // pass, orientation switch) means the paths must point at those sizes and
     // any missing thumbs must be generated. Refreshing the paths right away
@@ -573,7 +578,11 @@ void HomeActivity::render(RenderLock&&) {
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   renderer.displayBuffer(cleanInitialRefresh && !firstRenderDone ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);
-  ota_boot::confirmRunningSlot();
+  if (ota_boot::confirmationPending() && ota_boot::confirmRunningSlot()) {
+    guest = guest_slot::inspect();
+    if (guest.image.installed) guestLabel = std::string(tr(STR_READMAXER)) + " " + guest.image.version;
+    requestUpdate();
+  }
 
   if (!firstRenderDone) {
     firstRenderDone = true;

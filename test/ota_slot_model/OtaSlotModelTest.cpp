@@ -31,6 +31,14 @@ SelectEntry entry(uint32_t seq, uint32_t state) {
 
 void apply(Otadata& otadata, const EntryWrite& write) { otadata[write.sector] = write.entry; }
 
+EntryWrite planSelect(const Otadata& entries, uint32_t slot, uint32_t state) {
+  EntryWrite write{};
+  const int active = activeEntry(entries);
+  const uint32_t running = active < 0 ? slot : entrySlot(entries[active]);
+  EXPECT_TRUE(ota_boot::planSelect(entries, running, slot, state, write));
+  return write;
+}
+
 // IDF bootloader slot selection (bootloader_utility_get_selected_boot_partition)
 // with no factory partition: a PENDING_VERIFY entry that reaches another boot
 // is aborted, a NEW entry becomes PENDING_VERIFY, and blank otadata boots ota_0.
@@ -59,7 +67,8 @@ void forkHomeRendered(Otadata& otadata, uint32_t runningSlot, const BootPlan& pl
 // keepRunningSlot() before a deliberate sleep or idle while confirmation is pending.
 void forkKeepsRunningSlot(Otadata& otadata, uint32_t runningSlot, const BootPlan& plan) {
   EntryWrite write{};
-  if (plan.confirmAfterHome && planKeepRunningSlot(otadata, runningSlot, write)) apply(otadata, write);
+  if (plan.confirmAfterHome && planKeepRunningSlot(otadata, runningSlot, write) == KeepPlan::Write)
+    apply(otadata, write);
 }
 
 class FallbackBothRollbackSettings : public ::testing::TestWithParam<bool> {};
@@ -139,11 +148,51 @@ TEST(OtaSlotModel, ArmedFallbackNeverPermitsGuestSwitchToEraseForkSector) {
       ASSERT_EQ(checkRunningSlot(data, forkSlot), SlotCheck::FellBack);
       EXPECT_FALSE(guest_slot::canSwitch(checkRunningSlot(data, forkSlot), true));
       EXPECT_FALSE(guest_slot::canSwitch(checkRunningSlot(data, forkSlot), false));
-      const EntryWrite unsafe = planSelect(data, 1 - forkSlot, kOtaImgNew);
-      EXPECT_EQ(unsafe.sector, forkSector);
+      EntryWrite safe{};
+      ASSERT_TRUE(ota_boot::planSelect(data, forkSlot, 1 - forkSlot, kOtaImgNew, safe));
+      EXPECT_NE(safe.sector, forkSector);
       EXPECT_EQ(data[forkSector].ota_state, kOtaImgValid);
     }
   }
+}
+
+TEST(OtaSlotModel, EveryWritePlanPreservesNewestValidRunningEntry) {
+  for (uint32_t forkSlot = 0; forkSlot < kSlotCount; ++forkSlot) {
+    for (uint32_t forkSector = 0; forkSector < kEntrySectors; ++forkSector) {
+      Otadata data = {blankEntry(), blankEntry()};
+      data[forkSector] = entry(forkSlot + 3u, kOtaImgValid);
+      data[1u - forkSector] = entry(forkSlot + 4u, kOtaImgValid);
+      const auto protectedEntry = data[forkSector];
+      EntryWrite write{};
+      ASSERT_EQ(planKeepRunningSlot(data, forkSlot, write), KeepPlan::Write);
+      EXPECT_EQ(write.sector, 1u - forkSector);
+      apply(data, write);
+      EXPECT_EQ(std::memcmp(&data[forkSector], &protectedEntry, sizeof(protectedEntry)), 0);
+      for (uint32_t target = 0; target < kSlotCount; ++target) {
+        ASSERT_TRUE(ota_boot::planSelect(data, forkSlot, target, kOtaImgNew, write));
+        EXPECT_EQ(write.sector, 1u - forkSector);
+      }
+    }
+  }
+}
+
+TEST(OtaSlotModel, SelectRefusesBlankAndWrappedSequences) {
+  for (uint32_t sector = 0; sector < kEntrySectors; ++sector) {
+    for (uint32_t slot = 0; slot < kSlotCount; ++slot) {
+      Otadata data = {blankEntry(), blankEntry()};
+      data[sector] = entry(0xFFFFFFFEu, kOtaImgValid);
+      EntryWrite write{};
+      EXPECT_FALSE(ota_boot::planSelect(data, slot, 0, kOtaImgNew, write));
+      EXPECT_FALSE(ota_boot::planSelect(data, slot, 1, kOtaImgNew, write));
+      EXPECT_EQ(planKeepRunningSlot(data, 1u - entrySlot(data[sector]), write), KeepPlan::Unsafe);
+    }
+  }
+  Otadata lastUsable = {entry(0xFFFFFFFDu, kOtaImgValid), blankEntry()};
+  EntryWrite write{};
+  ASSERT_TRUE(ota_boot::planSelect(lastUsable, 0, 1, kOtaImgNew, write));
+  EXPECT_EQ(write.entry.ota_seq, 0xFFFFFFFEu);
+  apply(lastUsable, write);
+  EXPECT_EQ(activeEntry(lastUsable), 1);
 }
 
 TEST(OtaSlotModel, CheckRunningSlotClassifiesEveryOtadataState) {
@@ -192,23 +241,23 @@ TEST(OtaSlotModel, KeepRunningSlotReselectsTheRunningSlotAsNew) {
   // Armed: the active entry selects the other slot.
   Otadata armed = {entry(3, kOtaImgValid), entry(2, kPendingVerify)};
   EntryWrite write{};
-  ASSERT_TRUE(planKeepRunningSlot(armed, 1, write));
+  ASSERT_EQ(planKeepRunningSlot(armed, 1, write), KeepPlan::Write);
   EXPECT_EQ(write.sector, 1u);
   EXPECT_EQ(write.entry.ota_seq, 4u);
   EXPECT_EQ(write.entry.ota_state, kOtaImgNew);
 
   // Pending verify under rollback: rewritten in place, the other sector keeps its entry.
   Otadata pending = {entry(3, kOtaImgValid), entry(4, kPendingVerify)};
-  ASSERT_TRUE(planKeepRunningSlot(pending, 1, write));
+  ASSERT_EQ(planKeepRunningSlot(pending, 1, write), KeepPlan::Write);
   EXPECT_EQ(write.sector, 1u);
   EXPECT_EQ(write.entry.ota_seq, 4u);
   EXPECT_EQ(write.entry.ota_state, kOtaImgNew);
   EXPECT_EQ(write.entry.crc, computeSeqCrc(4));
 
   Otadata ownNew = {entry(3, kOtaImgValid), entry(4, kOtaImgNew)};
-  EXPECT_FALSE(planKeepRunningSlot(ownNew, 1, write));
+  EXPECT_EQ(planKeepRunningSlot(ownNew, 1, write), KeepPlan::NoWrite);
   Otadata ownValid = {entry(3, kOtaImgValid), entry(4, kOtaImgValid)};
-  EXPECT_FALSE(planKeepRunningSlot(ownValid, 1, write));
+  EXPECT_EQ(planKeepRunningSlot(ownValid, 1, write), KeepPlan::NoWrite);
 }
 
 TEST_P(FallbackBothRollbackSettings, CrashBeforeHomeBootsTheOtherSlotOnEveryLaterReset) {

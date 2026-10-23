@@ -40,10 +40,10 @@ struct EntryWrite {
   SelectEntry entry;
 };
 
-// The entry that makes the bootloader select `slot` with `state`: the smallest
-// seq above the active one that maps to `slot`, written over the sector that
-// does not hold the active entry, so a torn write leaves the active entry intact.
-EntryWrite planSelect(const SelectEntry (&entries)[kEntrySectors], uint32_t slot, uint32_t state);
+// Plan a selection without erasing the running slot's newest VALID entry.
+// Refuse when no sequence below the bootloader's blank value can win.
+bool planSelect(const SelectEntry (&entries)[kEntrySectors], uint32_t runningSlot, uint32_t slot, uint32_t state,
+                EntryWrite& write);
 
 enum class SlotCheck {
   Confirmed,    // the active entry selects the running slot as VALID
@@ -64,13 +64,15 @@ struct BootPlan {
 BootPlan planBoot(const SelectEntry (&entries)[kEntrySectors], uint32_t runningSlot, bool deepSleepWake);
 
 // The write that makes the next boot return to the running slot before a
-// deliberate sleep or idle while confirmation is pending, or false when none is
-// needed. The running slot is selected as NEW, not VALID: the next cold boot
+// deliberate sleep or idle while confirmation is pending. NoWrite means the
+// running slot is already selected. Unsafe means no usable sequence remains. The running
+// slot is selected as NEW, not VALID: the next cold boot
 // arms the fallback again, and a bootloader with rollback on turns NEW into
 // PENDING_VERIFY and aborts it after a crash. When the active entry already
-// selects the running slot, its sector is rewritten in place, so the other
-// sector keeps the other slot's entry as the bootloader's fallback.
-bool planKeepRunningSlot(const SelectEntry (&entries)[kEntrySectors], uint32_t runningSlot, EntryWrite& write);
+// selects the running slot without a VALID entry, its sector is rewritten in
+// place, so the other sector keeps the other slot's entry as the fallback.
+enum class KeepPlan { NoWrite, Write, Unsafe };
+KeepPlan planKeepRunningSlot(const SelectEntry (&entries)[kEntrySectors], uint32_t runningSlot, EntryWrite& write);
 
 // Reads `len` bytes at `offset` of a slot. Returns false on a read error.
 using SlotReader = bool (*)(uint32_t offset, void* dst, uint32_t len, void* ctx);

@@ -70,7 +70,12 @@ bool switchTo(const esp_partition_t* dest, const uint32_t state) {
     LOG_ERR("BOOT", "otadata missing or unreadable");
     return false;
   }
-  const EntryWrite write = planSelect(entries, static_cast<uint32_t>(slot), state);
+  const int running = otaSlotOf(esp_ota_get_running_partition());
+  EntryWrite write{};
+  if (running < 0 || !planSelect(entries, static_cast<uint32_t>(running), static_cast<uint32_t>(slot), state, write)) {
+    LOG_ERR("BOOT", "no safe otadata write for slot %d", slot);
+    return false;
+  }
   if (!writeEntry(otadata, write)) {
     LOG_ERR("BOOT", "otadata write failed (sector=%u)", static_cast<unsigned>(write.sector));
     return false;
@@ -102,7 +107,12 @@ void armBootFallback() {
   const bool holds = guest_slot::checkAndCache(other);
   imageCheckUs = esp_timer_get_time() - started;
   if (holds) {
-    selectedOtherSlot = writeEntry(otadata, planSelect(entries, otherSlot, kOtaImgValid));
+    EntryWrite write{};
+    if (!planSelect(entries, runningSlot, otherSlot, kOtaImgValid, write)) {
+      LOG_ERR("BOOT", "no safe otadata write for fallback");
+      return;
+    }
+    selectedOtherSlot = writeEntry(otadata, write);
     if (selectedOtherSlot) runningConfirmed = false;
   }
 #endif
@@ -118,7 +128,12 @@ bool keepRunningSlot() {
     return false;
   }
   EntryWrite write{};
-  if (!planKeepRunningSlot(entries, static_cast<uint32_t>(running), write)) return true;
+  const KeepPlan plan = planKeepRunningSlot(entries, static_cast<uint32_t>(running), write);
+  if (plan == KeepPlan::NoWrite) return true;
+  if (plan == KeepPlan::Unsafe) {
+    LOG_ERR("BOOT", "no safe otadata write to keep running slot");
+    return false;
+  }
   if (!writeEntry(otadata, write)) {
     LOG_ERR("BOOT", "keep running slot: otadata write failed (sector=%u)", static_cast<unsigned>(write.sector));
     return false;
