@@ -45,6 +45,7 @@
 #if FREEINK_DEVICE_X4PRO
 #include "activities/settings/GuestInstallActivity.h"
 #include "network/GuestDevLoop.h"
+#include "network/GuestLog.h"
 #endif
 #include "activities/settings/SdFirmwareUpdateActivity.h"
 #include "components/UITheme.h"
@@ -577,6 +578,9 @@ void setupDisplayAndFonts(bool seamless = false) {
 }
 
 void setup() {
+#if FREEINK_DEVICE_X4PRO
+  guest_log::captureAtBoot();
+#endif
   BoardConfig::holdPowerRails();
   ota_boot::armBootFallback();
 

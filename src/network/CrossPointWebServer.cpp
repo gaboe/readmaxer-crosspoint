@@ -38,6 +38,7 @@
 #include "FontInstaller.h"
 #include "GuestDevLoop.h"
 #include "GuestInstall.h"
+#include "GuestLog.h"
 #include "GuestSlot.h"
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
@@ -173,14 +174,30 @@ void CrossPointWebServer::handleGuestInstall() {
   }
   guestInstallStatus(true, "", guestInstallContext);
   char sha[65];
-  const auto result = guest_install::install(sha);
-  const bool receipt = guest_install::writeReceipt(sha, result);
+  guest_install::Timing timing;
+  const auto result = guest_install::install(sha, timing);
+  timing.uploadBytes = guestUploadBytes;
+  timing.uploadReceive = guestUploadMs;
+  guestUploadBytes = guestUploadMs = 0;
+  const bool receipt = guest_install::writeReceipt(sha, result, timing);
   const char* name = guest_install::resultName(result);
+  LOG_INF("GUEST",
+          "Install %s: upload %lu B/%lu ms, manifest %lu, validate %lu, erase+write %lu, readback %lu, select %lu ms",
+          name, static_cast<unsigned long>(timing.uploadBytes), static_cast<unsigned long>(timing.uploadReceive),
+          static_cast<unsigned long>(timing.manifest), static_cast<unsigned long>(timing.validate),
+          static_cast<unsigned long>(timing.eraseWrite), static_cast<unsigned long>(timing.readbackHash),
+          static_cast<unsigned long>(timing.selection));
   if (result != guest_install::Result::Ok) LOG_ERR("GUEST", "Install: %s", name);
   if (!receipt) LOG_ERR("GUEST", "Cannot save install receipt");
-  char response[160];
-  snprintf(response, sizeof(response), "{\"result\":\"%s\",\"sha256\":\"%s\",\"receipt_saved\":%s}", name, sha,
-           receipt ? "true" : "false");
+  char response[512];
+  char details[256];
+  if (!guest_install::formatTiming(details, sizeof(details), timing)) {
+    LOG_ERR("GUEST", "Cannot format install timing");
+    server->send(500, "application/json", "{\"result\":\"TIMING_FAILED\"}");
+    return;
+  }
+  snprintf(response, sizeof(response), "{\"result\":\"%s\",\"sha256\":\"%s\",\"receipt_saved\":%s,%s}", name, sha,
+           receipt ? "true" : "false", details);
   server->sendHeader("Connection", "close");
   server->send(result == guest_install::Result::Ok ? 200 : 409, "application/json", response);
   server->client().flush();
@@ -241,6 +258,23 @@ void CrossPointWebServer::handleGuestState() const {
   doc["guest_version"] = guest.image.installed ? guest.image.version : "";
   doc["devloop"] = Storage.exists(guest_devloop::kFlagPath);
   sendJson(doc);
+}
+
+void CrossPointWebServer::handleGuestLog() const {
+  if (!guest_log::available()) {
+    server->send(404, "text/plain", "");
+    return;
+  }
+  server->setContentLength(guest_log::length());
+  server->send(200, "text/plain; charset=utf-8", "");
+  auto client = server->client();
+  size_t sent = 0;
+  while (sent < guest_log::length()) {
+    const size_t count =
+        client.write(reinterpret_cast<const uint8_t*>(guest_log::text()) + sent, guest_log::length() - sent);
+    if (count == 0) break;
+    sent += count;
+  }
 }
 
 void CrossPointWebServer::handleForkUpdate() {
@@ -440,6 +474,7 @@ void CrossPointWebServer::begin() {
   server->on("/api/readmaxer/install", HTTP_POST, [this] { handleGuestInstall(); });
   server->on("/api/readmaxer/start", HTTP_POST, [this] { handleGuestStart(); });
   server->on("/api/readmaxer/state", HTTP_GET, [this] { handleGuestState(); });
+  server->on("/api/readmaxer/guest-log", HTTP_GET, [this] { handleGuestLog(); });
   server->on("/api/readmaxer/update-fork", HTTP_POST, [this] { handleForkUpdate(); });
 #endif
 
@@ -1034,7 +1069,7 @@ static void removeUploadedFile(const CrossPointWebServer::UploadState& state) {
   Storage.remove(filePath.c_str());
 }
 
-void CrossPointWebServer::handleUpload(UploadState& state) const {
+void CrossPointWebServer::handleUpload(UploadState& state) {
   static size_t lastLoggedSize = 0;
 
   // Reset watchdog at start of every upload callback - HTTP parsing can be slow
@@ -1169,6 +1204,12 @@ void CrossPointWebServer::handleUpload(UploadState& state) const {
       if (state.error.isEmpty()) {
         state.success = true;
         const unsigned long elapsed = millis() - uploadStartTime;
+#if FREEINK_DEVICE_X4PRO
+        if (state.path == "/readmaxer" && state.fileName == "install.bin") {
+          guestUploadBytes = state.size;
+          guestUploadMs = elapsed;
+        }
+#endif
         const float avgKbps = (elapsed > 0) ? (state.size / 1024.0) / (elapsed / 1000.0) : 0;
         const float writePercent = (elapsed > 0) ? (totalWriteTime * 100.0 / elapsed) : 0;
         LOG_DBG("WEB", "[UPLOAD] Complete: %s (%d bytes in %lu ms, avg %.1f KB/s)", state.fileName.c_str(), state.size,

@@ -25,6 +25,7 @@
 namespace guest_install {
 namespace {
 constexpr uint32_t CHUNK = 4096;
+constexpr uint32_t ERASE_BLOCK = 64 * 1024;
 struct Workspace {
   uint8_t buffer[CHUNK];
   mbedtls_sha256_context imageHash;
@@ -94,7 +95,8 @@ bool announce() {
   return true;
 }
 
-Result install(char (&shaHex)[65]) {
+Result install(char (&shaHex)[65], Timing& timing) {
+  timing = {};
   shaHex[0] = '\0';
   const auto* running = esp_ota_get_running_partition();
   const auto* dest = esp_ota_get_next_update_partition(nullptr);
@@ -108,7 +110,9 @@ Result install(char (&shaHex)[65]) {
     return Result::NoMemory;
   }
   uint8_t expected[32];
+  const uint32_t manifestStart = millis();
   const auto manifest = readManifest(*work, shaHex, expected);
+  timing.manifest = millis() - manifestStart;
   if (manifest != Result::Ok) return manifest;
   char mac[13];
   if (!ownMac(mac)) return Result::BadIdentity;
@@ -117,37 +121,61 @@ Result install(char (&shaHex)[65]) {
   const auto size64 = file.fileSize64();
   if (size64 > dest->size) return Result::TooLarge;
   const uint32_t size = static_cast<uint32_t>(size64);
+  timing.imageBytes = size;
   if (mbedtls_sha256_starts(&work->imageHash, 0) || mbedtls_sha256_starts(&work->fileHash, 0))
     return Result::ReadFailed;
+  const uint32_t validateStart = millis();
   const auto checked = validate(readFile, &file, size, dest->size, mac, expected, hasher(work->imageHash),
                                 hasher(work->fileHash), work->buffer, CHUNK);
+  timing.validate = millis() - validateStart;
   if (checked != Result::Ok) return checked;
 
   {
     ota_boot::AppWriteGuard guard(dest);
     if (!guard) return Result::GuardRefused;
     guest_slot::invalidateCache();
+    const uint32_t writeStart = millis();
     for (uint32_t pos = 0; pos < size; pos += CHUNK) {
       const uint32_t len = std::min(CHUNK, size - pos);
-      if (!readFile(pos, work->buffer, len, &file)) return Result::ReadFailed;
-      if (esp_partition_erase_range(dest, pos, CHUNK) != ESP_OK ||
-          esp_partition_write(dest, pos, work->buffer, len) != ESP_OK)
+      if (!readFile(pos, work->buffer, len, &file)) {
+        timing.eraseWrite = millis() - writeStart;
+        return Result::ReadFailed;
+      }
+      if (pos % ERASE_BLOCK == 0 &&
+          esp_partition_erase_range(dest, pos, std::min(ERASE_BLOCK, dest->size - pos)) != ESP_OK) {
+        timing.eraseWrite = millis() - writeStart;
         return Result::WriteFailed;
+      }
+      if (esp_partition_write(dest, pos, work->buffer, len) != ESP_OK) {
+        timing.eraseWrite = millis() - writeStart;
+        return Result::WriteFailed;
+      }
     }
+    timing.eraseWrite = millis() - writeStart;
+    const uint32_t readbackStart = millis();
     if (mbedtls_sha256_starts(&work->fileHash, 0)) return Result::ReadFailed;
     for (uint32_t pos = 0; pos < size; pos += CHUNK) {
       const uint32_t len = std::min(CHUNK, size - pos);
       if (esp_partition_read(dest, pos, work->buffer, len) != ESP_OK ||
-          mbedtls_sha256_update(&work->fileHash, work->buffer, len))
+          mbedtls_sha256_update(&work->fileHash, work->buffer, len)) {
+        timing.readbackHash = millis() - readbackStart;
         return Result::ReadFailed;
+      }
       resetTaskWatchdogIfSubscribed();
       delay(1);
     }
     uint8_t actual[32];
-    if (mbedtls_sha256_finish(&work->fileHash, actual)) return Result::ReadFailed;
+    if (mbedtls_sha256_finish(&work->fileHash, actual)) {
+      timing.readbackHash = millis() - readbackStart;
+      return Result::ReadFailed;
+    }
+    timing.readbackHash = millis() - readbackStart;
     if (std::memcmp(actual, expected, sizeof(actual))) return Result::BadReadback;
   }
-  switch (ota_boot::switchTo(dest)) {
+  const uint32_t selectionStart = millis();
+  const auto selection = ota_boot::switchTo(dest);
+  timing.selection = millis() - selectionStart;
+  switch (selection) {
     case ota_boot::SelectionResult::Selected:
       return Result::Ok;
     case ota_boot::SelectionResult::Failed:
@@ -158,10 +186,25 @@ Result install(char (&shaHex)[65]) {
   return Result::SelectionFailed;
 }
 
-bool writeReceipt(const char* shaHex, Result result) {
-  char text[192];
-  const int len = snprintf(text, sizeof(text), "{\"sha256\":\"%s\",\"result\":\"%s\",\"time\":%lld}\n", shaHex,
-                           resultName(result), static_cast<long long>(time(nullptr)));
+bool formatTiming(char* out, size_t capacity, const Timing& timing) {
+  const int len =
+      snprintf(out, capacity,
+               "\"timing_ms\":{\"upload_receive\":%lu,\"manifest\":%lu,\"validate\":%lu,"
+               "\"erase_write\":%lu,\"readback_hash\":%lu,\"selection\":%lu},"
+               "\"bytes\":{\"upload\":%lu,\"image\":%lu}",
+               static_cast<unsigned long>(timing.uploadReceive), static_cast<unsigned long>(timing.manifest),
+               static_cast<unsigned long>(timing.validate), static_cast<unsigned long>(timing.eraseWrite),
+               static_cast<unsigned long>(timing.readbackHash), static_cast<unsigned long>(timing.selection),
+               static_cast<unsigned long>(timing.uploadBytes), static_cast<unsigned long>(timing.imageBytes));
+  return len >= 0 && static_cast<size_t>(len) < capacity;
+}
+
+bool writeReceipt(const char* shaHex, Result result, const Timing& timing) {
+  char text[512];
+  char details[256];
+  if (!formatTiming(details, sizeof(details), timing)) return false;
+  const int len = snprintf(text, sizeof(text), "{\"sha256\":\"%s\",\"result\":\"%s\",\"time\":%lld,%s}\n", shaHex,
+                           resultName(result), static_cast<long long>(time(nullptr)), details);
   HalFile file;
   if (len < 0 || static_cast<size_t>(len) >= sizeof(text) ||
       !Storage.openFileForWrite("GUEST", "/readmaxer/last-install.tmp", file))

@@ -98,9 +98,12 @@ class CrossPointWebServer {
 #if FREEINK_DEVICE_X4PRO
   GuestInstallStatus guestInstallStatus = nullptr;
   void* guestInstallContext = nullptr;
+  uint32_t guestUploadBytes = 0;
+  uint32_t guestUploadMs = 0;
   void handleGuestInstall();
   void handleGuestStart();
   void handleGuestState() const;
+  void handleGuestLog() const;
   void handleForkUpdate();
 #endif
   void handleRemoteInput() const;
@@ -129,7 +132,7 @@ class CrossPointWebServer {
   // connection) if a write stalls. Caller sets headers/content-length and
   // closes the file.
   void streamFileToClient(HalFile& file) const;
-  void handleUpload(UploadState& state) const;
+  void handleUpload(UploadState& state);
   void handleUploadPost(UploadState& state) const;
   void handleCreateFolder() const;
   void handleRename() const;

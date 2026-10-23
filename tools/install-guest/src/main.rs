@@ -237,21 +237,59 @@ fn wait(host: &str, timeout: Duration) -> Result<String> {
     }
 }
 
-fn upload_to(host: &str, path: &Path, name: &str, directory: &str) -> Result<()> {
-    let path = path.to_str().ok_or("Image path must be valid UTF-8")?;
-    let quoted = path.replace('\\', "\\\\").replace('"', "\\\"");
-    request(
-        host,
-        &format!("/upload?path={directory}"),
-        &[
-            "--form".into(),
-            format!("file=@\"{quoted}\";filename={name}"),
-        ],
-    )?;
-    Ok(())
+struct UploadReport {
+    bytes: u64,
+    elapsed: Duration,
 }
 
-fn upload(host: &str, path: &Path, name: &str) -> Result<()> {
+fn upload_to(host: &str, path: &Path, name: &str, directory: &str) -> Result<UploadReport> {
+    let path = path.to_str().ok_or("Image path must be valid UTF-8")?;
+    let quoted = path.replace('\\', "\\\\").replace('"', "\\\"");
+    let bytes = fs::metadata(path)?.len();
+    for attempt in 0..=3 {
+        let started = Instant::now();
+        let output = Command::new("curl")
+            .args([
+                "--silent",
+                "--show-error",
+                "--write-out",
+                "\n%{http_code} %{size_upload}",
+                "--connect-timeout",
+                "10",
+                "--max-time",
+                "300",
+                "--noproxy",
+                "*",
+                "--proto",
+                "=http",
+                "--form",
+            ])
+            .arg(format!("file=@\"{quoted}\";filename={name}"))
+            .arg(format!("http://{host}/upload?path={directory}"))
+            .output()?;
+        let elapsed = started.elapsed();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let (body, metrics) = stdout.rsplit_once('\n').ok_or("Missing upload metrics")?;
+        let (status, sent) = metrics.split_once(' ').ok_or("Invalid upload metrics")?;
+        let sent: f64 = sent.parse()?;
+        if output.status.success() {
+            let status: u16 = status.parse()?;
+            if !(200..300).contains(&status) {
+                return Err(format!("/upload: HTTP {status}: {body}").into());
+            }
+            return Ok(UploadReport { bytes, elapsed });
+        }
+        let error = String::from_utf8_lossy(&output.stderr);
+        if attempt < 3 && sent == 0.0 && error.contains("No route to host") {
+            thread::sleep(Duration::from_secs(1));
+            continue;
+        }
+        return Err(format!("/upload: {body} {}", error.trim()).into());
+    }
+    unreachable!()
+}
+
+fn upload(host: &str, path: &Path, name: &str) -> Result<UploadReport> {
     upload_to(host, path, name, "/readmaxer")
 }
 
@@ -321,6 +359,7 @@ fn unconfirmed(host: &str, detail: &str) -> Box<dyn Error> {
 }
 
 fn install(host: &str, image: &Path) -> Result<String> {
+    let total_start = Instant::now();
     validate_host(host)?;
     let staging = Staging::create()?;
     // Hash and upload one immutable snapshot even if the build replaces its output.
@@ -357,7 +396,7 @@ fn install(host: &str, image: &Path) -> Result<String> {
             )?;
         }
     }
-    upload(host, &image_copy, "install.bin")?;
+    let image_upload = upload(host, &image_copy, "install.bin")?;
     upload(host, &manifest, "install.json")?;
     let response = exchange(
         host,
@@ -379,7 +418,16 @@ fn install(host: &str, image: &Path) -> Result<String> {
     if response.status != 200 || code != "OK" || result["sha256"] != sha {
         return Err(unconfirmed(host, &response.body));
     }
-    Ok(response.body)
+    let seconds = image_upload.elapsed.as_secs_f64();
+    let rate = image_upload.bytes as f64 / seconds / 1024.0;
+    Ok(format!(
+        "{}\nUpload: {} bytes in {:.2} s ({:.1} KiB/s). Total: {:.2} s.",
+        response.body,
+        image_upload.bytes,
+        seconds,
+        rate,
+        total_start.elapsed().as_secs_f64()
+    ))
 }
 
 fn main() {
@@ -391,6 +439,7 @@ fn main() {
             Some("install") if args.len() == 2 => install(&host, Path::new(&args[1])),
             Some("start") if args.len() == 1 => start(&host),
             Some("state") if args.len() == 1 => state(&host),
+            Some("guest-log") if args.len() == 1 => request(&host, "/api/readmaxer/guest-log", &[]),
             Some("fetch-diag") if args.len() == 2 => fetch_diag(&host, Path::new(&args[1])),
             Some("input") if args.len() == 2 => input(&host, args[1].to_str().ok_or("Invalid button")?),
             Some("screen") if args.len() == 2 => screen(&host, Path::new(&args[1])),
@@ -403,7 +452,7 @@ fn main() {
                 };
                 wait(&host, Duration::from_secs(seconds))
             }
-            _ => Err("Usage: install-guest install IMAGE.bin | update-fork IMAGE.bin | start | state | fetch-diag DIR | wait [SECONDS] | input BUTTON | screen OUT.pbm".into()),
+            _ => Err("Usage: install-guest install IMAGE.bin | update-fork IMAGE.bin | guest-log | start | state | fetch-diag DIR | wait [SECONDS] | input BUTTON | screen OUT.pbm".into()),
         }
     })();
     match result {
@@ -464,6 +513,20 @@ mod tests {
         });
         let result = call(&host);
         (result, server.join().unwrap())
+    }
+
+    #[test]
+    fn guest_log_reads_plain_text_and_reports_missing_log() {
+        let (log, requests) = serve(vec![(200, b"guest boot\nSD failed\n".to_vec())], |host| {
+            request(host, "/api/readmaxer/guest-log", &[])
+        });
+        assert_eq!(log.unwrap(), "guest boot\nSD failed\n");
+        assert!(requests[0].starts_with("GET /api/readmaxer/guest-log "));
+
+        let (missing, _) = serve(vec![(404, Vec::new())], |host| {
+            request(host, "/api/readmaxer/guest-log", &[])
+        });
+        assert!(missing.unwrap_err().to_string().contains("HTTP 404"));
     }
 
     fn exercise(

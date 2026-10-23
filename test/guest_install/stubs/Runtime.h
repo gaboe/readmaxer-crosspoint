@@ -35,6 +35,7 @@ inline bool changeSource = false;
 inline bool failReceiptClose = false;
 inline bool failReceiptRename = false;
 inline int erases = 0;
+inline size_t erasedBytes = 0;
 inline int writes = 0;
 inline int selections = 0;
 inline uint32_t selectedState = 0;
@@ -94,8 +95,10 @@ inline int esp_partition_erase_range(const esp_partition_t* partition, size_t of
   EXPECT_EQ(partition, &fake::destination);
   EXPECT_TRUE(fake::guardHeld);
   EXPECT_EQ(offset % 4096, 0u);
-  EXPECT_EQ(len, 4096u);
+  EXPECT_EQ(len % 4096, 0u);
+  EXPECT_LE(len, 65536u);
   ++fake::erases;
+  fake::erasedBytes += len;
   std::fill_n(fake::flash.begin() + offset, len, 0xff);
   return ESP_OK;
 }
@@ -137,8 +140,10 @@ inline int mbedtls_sha256_finish(mbedtls_sha256_context* sha, uint8_t* out) {
 }
 
 inline void delay(unsigned) {}
+inline uint32_t millis() { return 100; }
 inline void resetTaskWatchdogIfSubscribed() {}
 #define LOG_ERR(...) ((void)0)
+#define LOG_INF(...) ((void)0)
 
 inline struct MdnsStub {
   bool begin(const char*) { return true; }

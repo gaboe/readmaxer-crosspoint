@@ -83,21 +83,21 @@ void seal(Bytes& image) {
   image.insert(image.end(), sha, sha + 32);
 }
 
-Bytes image(const char* markers = "READMAXER-GUEST-V1; SR_98c377bea840") {
-  Bytes bytes(32 + 8192 + 12, 0);
+Bytes image(const char* markers = "READMAXER-GUEST-V1; SR_98c377bea840", uint32_t segmentBytes = 8192) {
+  Bytes bytes(32 + segmentBytes + 12, 0);
   bytes[0] = 0xe9;
   bytes[1] = 2;
   bytes[12] = 9;
   bytes[23] = 1;
   put32(bytes, 24, 0x3c000020);
-  put32(bytes, 28, 8192);
+  put32(bytes, 28, segmentBytes);
   put32(bytes, 32, 0xabcd5432);
   std::memcpy(bytes.data() + 48, "test", 5);
   constexpr char project[] = "readmaxer-xteink-x4pro";
   std::memcpy(bytes.data() + 80, project, sizeof(project));
   std::memcpy(bytes.data() + 509, markers, std::strlen(markers));
-  put32(bytes, 8224, 0x42002028);
-  put32(bytes, 8228, 4);
+  put32(bytes, 32 + segmentBytes, 0x42002028);
+  put32(bytes, 36 + segmentBytes, 4);
   seal(bytes);
   return bytes;
 }
@@ -215,6 +215,7 @@ TEST(GuestInstall, RealRm3Image) {
 class GuestInstallProduction : public testing::Test {
  protected:
   char sha[65]{};
+  guest_install::Timing timing;
   void SetUp() override {
     fake::files.clear();
     fake::flash.assign(fake::destination.size, 0xa5);
@@ -223,6 +224,7 @@ class GuestInstallProduction : public testing::Test {
     fake::failWrite = fake::failRead = fake::changeSource = fake::failReceiptClose = false;
     fake::failReceiptRename = false;
     fake::erases = fake::writes = fake::selections = 0;
+    fake::erasedBytes = 0;
     fake::selection = ota_boot::SelectionResult::Selected;
     prepare(image());
   }
@@ -244,19 +246,19 @@ class GuestInstallProduction : public testing::Test {
 
 TEST_F(GuestInstallProduction, GuardRefusalLeavesFlashAndSelectionUntouched) {
   fake::guardAllowed = false;
-  EXPECT_EQ(guest_install::install(sha), Result::GuardRefused);
+  EXPECT_EQ(guest_install::install(sha, timing), Result::GuardRefused);
   expectUntouched();
 }
 
 TEST_F(GuestInstallProduction, PendingConfirmationLeavesFlashAndSelectionUntouched) {
   fake::pending = true;
-  EXPECT_EQ(guest_install::install(sha), Result::GuardRefused);
+  EXPECT_EQ(guest_install::install(sha, timing), Result::GuardRefused);
   expectUntouched();
 }
 
 TEST_F(GuestInstallProduction, RunningDestinationLeavesFlashAndSelectionUntouched) {
   fake::samePartition = true;
-  EXPECT_EQ(guest_install::install(sha), Result::NoPartition);
+  EXPECT_EQ(guest_install::install(sha, timing), Result::NoPartition);
   expectUntouched();
 }
 
@@ -265,18 +267,18 @@ TEST_F(GuestInstallProduction, InvalidImagesNeverReachErase) {
        {"", "READMAXER-GUEST-V1;SR_98c377bea841", "READMAXER-GUEST-V1;READMAXER-GUEST-V1;SR_98c377bea840",
         "READMAXER-GUEST-V1;READMAXER-HOST-V1;SR_98c377bea840"}) {
     prepare(image(markers));
-    EXPECT_EQ(guest_install::install(sha), Result::BadIdentity);
+    EXPECT_EQ(guest_install::install(sha, timing), Result::BadIdentity);
     expectUntouched();
   }
   auto bytes = image();
   bytes[80] = 'X';
   seal(bytes);
   prepare(bytes);
-  EXPECT_EQ(guest_install::install(sha), Result::WrongProject);
+  EXPECT_EQ(guest_install::install(sha, timing), Result::WrongProject);
   expectUntouched();
   bytes.resize(fake::destination.size + 1);
   prepare(bytes);
-  EXPECT_EQ(guest_install::install(sha), Result::TooLarge);
+  EXPECT_EQ(guest_install::install(sha, timing), Result::TooLarge);
   expectUntouched();
 }
 
@@ -284,24 +286,25 @@ TEST_F(GuestInstallProduction, WrongManifestNeverReachesErase) {
   auto& json = fake::files.at("/readmaxer/install.json");
   const std::string wrong = "{\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}";
   json.assign(wrong.begin(), wrong.end());
-  EXPECT_EQ(guest_install::install(sha), Result::WrongSha);
+  EXPECT_EQ(guest_install::install(sha, timing), Result::WrongSha);
   expectUntouched();
   json.assign(513, ' ');
-  EXPECT_EQ(guest_install::install(sha), Result::BadManifest);
+  EXPECT_EQ(guest_install::install(sha, timing), Result::BadManifest);
   expectUntouched();
   json = {'{', '}'};
-  EXPECT_EQ(guest_install::install(sha), Result::BadManifest);
+  EXPECT_EQ(guest_install::install(sha, timing), Result::BadManifest);
   expectUntouched();
 }
 
 TEST_F(GuestInstallProduction, GoodImageWritesAndSelectsNewGuest) {
   const auto expected = fake::files.at("/readmaxer/install.bin");
-  EXPECT_EQ(guest_install::install(sha), Result::Ok);
+  EXPECT_EQ(guest_install::install(sha, timing), Result::Ok);
   EXPECT_EQ(fake::selections, 1);
   EXPECT_EQ(fake::selectedState, ota_boot::kOtaImgNew);
   EXPECT_TRUE(std::equal(expected.begin(), expected.end(), fake::flash.begin()));
-  EXPECT_EQ(fake::erases, (expected.size() + 4095) / 4096);
-  EXPECT_TRUE(guest_install::writeReceipt(sha, Result::Ok));
+  EXPECT_EQ(fake::erases, (expected.size() + 65535) / 65536);
+  EXPECT_EQ(fake::erasedBytes, ((expected.size() + 65535) / 65536) * 65536);
+  EXPECT_TRUE(guest_install::writeReceipt(sha, Result::Ok, timing));
   const auto& receipt = fake::files.at("/readmaxer/last-install.json");
   const std::string text(receipt.begin(), receipt.end());
   EXPECT_NE(text.find(sha), std::string::npos);
@@ -309,46 +312,56 @@ TEST_F(GuestInstallProduction, GoodImageWritesAndSelectsNewGuest) {
   EXPECT_NE(text.find("\"time\":"), std::string::npos);
 }
 
+TEST_F(GuestInstallProduction, LargeImageErasesEach64KiBBlock) {
+  const auto expected = image("READMAXER-GUEST-V1; SR_98c377bea840", 73728);
+  prepare(expected);
+  EXPECT_EQ(guest_install::install(sha, timing), Result::Ok);
+  EXPECT_EQ(fake::erases, 2);
+  EXPECT_EQ(fake::erasedBytes, 131072u);
+  EXPECT_TRUE(std::equal(expected.begin(), expected.end(), fake::flash.begin()));
+  EXPECT_EQ(fake::selections, 1);
+}
+
 TEST_F(GuestInstallProduction, ReadbackMismatchNeverSelects) {
   fake::corruptReadback = true;
-  EXPECT_EQ(guest_install::install(sha), Result::BadReadback);
+  EXPECT_EQ(guest_install::install(sha, timing), Result::BadReadback);
   EXPECT_GT(fake::erases, 0);
   EXPECT_EQ(fake::selections, 0);
 }
 
 TEST_F(GuestInstallProduction, SourceChangedAfterValidationNeverSelects) {
   fake::changeSource = true;
-  EXPECT_EQ(guest_install::install(sha), Result::BadReadback);
+  EXPECT_EQ(guest_install::install(sha, timing), Result::BadReadback);
   EXPECT_EQ(fake::selections, 0);
 }
 
 TEST_F(GuestInstallProduction, WriteFailureNeverSelects) {
   fake::failWrite = true;
-  EXPECT_EQ(guest_install::install(sha), Result::WriteFailed);
+  EXPECT_EQ(guest_install::install(sha, timing), Result::WriteFailed);
   EXPECT_EQ(fake::selections, 0);
   EXPECT_FALSE(fake::guardHeld);
 }
 
 TEST_F(GuestInstallProduction, SelectionUnknownIsNotSuccess) {
   fake::selection = ota_boot::SelectionResult::Unknown;
-  EXPECT_EQ(guest_install::install(sha), Result::SelectionUnknown);
+  EXPECT_EQ(guest_install::install(sha, timing), Result::SelectionUnknown);
 }
 
 TEST_F(GuestInstallProduction, ReceiptCloseFailureDoesNotReplaceOldReceipt) {
   fake::files["/readmaxer/last-install.json"] = {'o', 'l', 'd'};
   fake::failReceiptClose = true;
-  EXPECT_FALSE(guest_install::writeReceipt(sha, Result::Ok));
+  EXPECT_FALSE(guest_install::writeReceipt(sha, Result::Ok, timing));
   EXPECT_EQ(fake::files.at("/readmaxer/last-install.json"), (Bytes{'o', 'l', 'd'}));
 }
 
 TEST_F(GuestInstallProduction, ReceiptRenameFailureRestoresOldReceipt) {
   fake::files["/readmaxer/last-install.json"] = {'o', 'l', 'd'};
   fake::failReceiptRename = true;
-  EXPECT_FALSE(guest_install::writeReceipt(sha, Result::Ok));
+  EXPECT_FALSE(guest_install::writeReceipt(sha, Result::Ok, timing));
   EXPECT_EQ(fake::files.at("/readmaxer/last-install.json"), (Bytes{'o', 'l', 'd'}));
   EXPECT_FALSE(fake::files.contains("/readmaxer/last-install.bak"));
   fake::failReceiptRename = false;
-  EXPECT_TRUE(guest_install::writeReceipt(sha, Result::Ok));
+  EXPECT_TRUE(guest_install::writeReceipt(sha, Result::Ok, timing));
   EXPECT_NE(fake::files.at("/readmaxer/last-install.json"), (Bytes{'o', 'l', 'd'}));
   EXPECT_FALSE(fake::files.contains("/readmaxer/last-install.bak"));
 }
@@ -360,7 +373,7 @@ TEST_F(GuestInstallProduction, RealRm3Install) {
   ASSERT_TRUE(file.good());
   Bytes bytes(std::istreambuf_iterator<char>(file), {});
   prepare(bytes);
-  EXPECT_EQ(guest_install::install(sha), Result::Ok);
+  EXPECT_EQ(guest_install::install(sha, timing), Result::Ok);
   EXPECT_EQ(fake::selections, 1);
   EXPECT_TRUE(std::equal(bytes.begin(), bytes.end(), fake::flash.begin()));
 }

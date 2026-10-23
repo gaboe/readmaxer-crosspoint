@@ -25,6 +25,7 @@ cargo run --locked --manifest-path tools/install-guest/Cargo.toml -- fetch-diag 
 cargo run --locked --manifest-path tools/install-guest/Cargo.toml -- input back
 cargo run --locked --manifest-path tools/install-guest/Cargo.toml -- screen ./screen.pbm
 cargo run --locked --manifest-path tools/install-guest/Cargo.toml -- update-fork ./readmaxer-fork.bin
+cargo run --locked --manifest-path tools/install-guest/Cargo.toml -- guest-log
 cargo run --locked --manifest-path tools/install-guest/Cargo.toml -- wait 60
 ```
 
@@ -33,6 +34,8 @@ polls `/api/status` until the reader answers or the timeout expires. The
 default timeout is 60 seconds. `fetch-diag` downloads `diag.txt` and
 `diag-last.txt` from `/readmaxer`; a missing file is reported and skipped.
 `screen` writes a binary PBM image in physical panel orientation.
+`guest-log` prints the valid RTC log saved when the fork booted. It reports HTTP 404
+if the fork found no valid guest log.
 `update-fork` uploads a snapshot of the image to the SD root and calls
 `POST /api/readmaxer/update-fork?path=/<file>.bin`. The route works only while
 the Install READMAXER screen is open. It uses the Settings SD firmware update
@@ -66,11 +69,15 @@ It replaces only the staging files `/readmaxer/install.bin` and `/readmaxer/inst
 It uploads both files through `/upload` before it requests installation.
 The reader checks the image, writes the other slot, checks the written bytes,
 and selects the guest through the guarded otadata writer.
+The tool prints image upload throughput and total install time. It retries an
+upload up to three times if the connection fails with `No route to host` before
+curl sends any bytes. It does not retry after the upload starts.
 
 An `OK` response means the reader selected the verified guest and requested a restart.
 It does not prove that the guest started. Check the reader's screen.
 `receipt_saved` reports whether the reader saved `/readmaxer/last-install.json`.
-The receipt contains the image SHA-256, result, and Unix time from the reader's clock.
+The receipt contains the image SHA-256, result, Unix time, `timing_ms`, and `bytes`.
+The install response has the same timing and byte counts.
 The time can be unset if the reader has no valid clock.
 
 A complete HTTP 409 JSON response reports a definite install error.
