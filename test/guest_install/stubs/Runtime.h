@@ -33,6 +33,7 @@ inline bool failWrite = false;
 inline bool failRead = false;
 inline bool changeSource = false;
 inline bool failReceiptClose = false;
+inline bool failReceiptRename = false;
 inline int erases = 0;
 inline int writes = 0;
 inline int selections = 0;
@@ -74,7 +75,11 @@ inline struct StorageStub {
     file.path = path;
     return true;
   }
-  bool replaceFile(const char* oldPath, const char* newPath) {
+  bool exists(const char* path) { return fake::files.contains(path); }
+  bool remove(const char* path) { return fake::files.erase(path) != 0; }
+  bool rename(const char* oldPath, const char* newPath) {
+    if (fake::failReceiptRename && std::strcmp(oldPath, "/readmaxer/last-install.tmp") == 0) return false;
+    if (!exists(oldPath) || exists(newPath)) return false;
     fake::files[newPath] = std::move(fake::files.at(oldPath));
     fake::files.erase(oldPath);
     return true;

@@ -31,12 +31,18 @@ impl Drop for Staging {
     }
 }
 
-fn request(host: &str, route: &str, args: &[String]) -> Result<String> {
+struct Response {
+    status: u16,
+    body: String,
+}
+
+fn exchange(host: &str, route: &str, args: &[String]) -> Result<Response> {
     let output = Command::new("curl")
         .args([
             "--silent",
             "--show-error",
-            "--fail-with-body",
+            "--write-out",
+            "\n%{http_code}",
             "--connect-timeout",
             "10",
             "--max-time",
@@ -57,7 +63,19 @@ fn request(host: &str, route: &str, args: &[String]) -> Result<String> {
         )
         .into());
     }
-    Ok(body)
+    let (body, status) = body.rsplit_once('\n').ok_or("Missing HTTP status")?;
+    Ok(Response {
+        status: status.parse()?,
+        body: body.to_owned(),
+    })
+}
+
+fn request(host: &str, route: &str, args: &[String]) -> Result<String> {
+    let response = exchange(host, route, args)?;
+    if !(200..300).contains(&response.status) {
+        return Err(format!("{route}: HTTP {}: {}", response.status, response.body).into());
+    }
+    Ok(response.body)
 }
 
 fn upload(host: &str, path: &Path, name: &str) -> Result<()> {
@@ -131,18 +149,27 @@ fn install(host: &str, image: &Path) -> Result<String> {
     }
     upload(host, &image_copy, "install.bin")?;
     upload(host, &manifest, "install.json")?;
-    let response = request(
+    let response = exchange(
         host,
         "/api/readmaxer/install",
         &["--request".into(), "POST".into()],
     )
     .map_err(|error| unconfirmed(host, &error.to_string()))?;
-    let result: Value = serde_json::from_str(&response)
+    let result: Value = serde_json::from_str(&response.body)
         .map_err(|_| unconfirmed(host, "Invalid install response."))?;
-    if result["result"] != "OK" || result["sha256"] != sha {
-        return Err(unconfirmed(host, &response));
+    let Some(code) = result["result"].as_str().filter(|code| !code.is_empty()) else {
+        return Err(unconfirmed(host, "Invalid install result."));
+    };
+    if code == "SELECTION_UNKNOWN" {
+        return Err(unconfirmed(host, &response.body));
     }
-    Ok(response)
+    if response.status == 409 && code != "OK" {
+        return Err(format!("Reader reported an install error: {}", response.body).into());
+    }
+    if response.status != 200 || code != "OK" || result["sha256"] != sha {
+        return Err(unconfirmed(host, &response.body));
+    }
+    Ok(response.body)
 }
 
 fn main() {
@@ -172,7 +199,11 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    fn exercise(fail_upload: bool, lose_install_reply: bool) -> (Result<String>, Vec<String>) {
+    fn exercise(
+        fail_upload: bool,
+        lose_install_reply: bool,
+        refuse_install: bool,
+    ) -> (Result<String>, Vec<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let host = listener.local_addr().unwrap().to_string();
         let server = thread::spawn(move || {
@@ -219,6 +250,8 @@ mod tests {
                     (200, "[]".to_owned())
                 } else if fail_upload {
                     (500, "SD write failed".to_owned())
+                } else if stage == 3 && refuse_install {
+                    (409, "{\"result\":\"WRONG_SHA\"}".to_owned())
                 } else if stage >= 3 {
                     (
                         200,
@@ -248,7 +281,7 @@ mod tests {
 
     #[test]
     fn uploads_image_and_matching_json_before_install() {
-        let (result, requests) = exercise(false, false);
+        let (result, requests) = exercise(false, false, false);
         assert!(result.is_ok(), "{result:?}");
         assert!(requests[1].starts_with("POST /upload?path=/readmaxer "));
         assert!(requests[1].contains("filename=\"install.bin\""));
@@ -259,19 +292,28 @@ mod tests {
 
     #[test]
     fn upload_failure_never_calls_install() {
-        let (result, requests) = exercise(true, false);
+        let (result, requests) = exercise(true, false, false);
         assert!(result.unwrap_err().to_string().contains("SD write failed"));
         assert_eq!(requests.len(), 2);
     }
 
     #[test]
     fn lost_install_response_is_unconfirmed() {
-        let (result, requests) = exercise(false, true);
+        let (result, requests) = exercise(false, true, false);
         let error = result.unwrap_err().to_string();
         assert!(error.contains("Install is unconfirmed"));
         assert!(error.contains("Stored receipt"));
         assert!(error.contains("\"result\":\"OK\""));
         assert_eq!(requests.len(), 5);
         assert!(requests[4].starts_with("GET /download?path=/readmaxer/last-install.json "));
+    }
+
+    #[test]
+    fn complete_http_409_is_a_definite_refusal() {
+        let (result, requests) = exercise(false, false, true);
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("WRONG_SHA"));
+        assert!(!error.contains("unconfirmed"));
+        assert_eq!(requests.len(), 4);
     }
 }

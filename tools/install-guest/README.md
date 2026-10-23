@@ -1,5 +1,8 @@
 # Install the READMAXER guest over Wi-Fi
 
+Known POC limit: the install screen exposes the install endpoint to every client
+on the joined Wi-Fi. Use it only on a trusted network.
+
 1. Save the reader's Wi-Fi network in Settings.
 2. Open **Settings > General > Install READMAXER** on the X4 Pro.
 3. Wait for the screen to show its hostname and IP address.
@@ -24,7 +27,13 @@ It does not prove that the guest started. Check the reader's screen.
 The receipt contains the image SHA-256, result, and Unix time from the reader's clock.
 The time can be unset if the reader has no valid clock.
 
-If the install response is lost, the result is unconfirmed.
+A complete HTTP 409 JSON response reports a definite install error.
+A refusal before the first erase changes no flash. A later write or readback failure
+can leave a partial guest slot. It never selects that slot and keeps a CRC-valid
+VALID otadata entry naming the bootable fork. A selection failure or unknown
+readback after an otadata erase also keeps that fork entry through CP2's guarded plan.
+
+If the install response is lost, malformed, or reports `SELECTION_UNKNOWN`, the result is unconfirmed.
 The tool reads the saved receipt once and prints it if the reader is reachable.
 The receipt can be from an earlier install. Compare its SHA-256 with the intended image.
 Do not repeat the install automatically. Check the reader first.

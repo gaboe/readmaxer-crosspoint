@@ -1,7 +1,8 @@
 # Webserver Endpoints
 
 This document describes the HTTP, WebSocket, WebDAV, and discovery endpoints
-available while CrossPoint Reader is in File Transfer or Calibre Wireless mode.
+available while CrossPoint Reader is in File Transfer, Calibre Wireless, or the
+Settings > General > Install READMAXER screen.
 
 - HTTP server: port 80
 - WebSocket upload server: port 81
@@ -143,6 +144,8 @@ Notes:
 ### `POST /api/readmaxer/install`
 
 X4 Pro only. The endpoint is enabled while **Settings > General > Install READMAXER** is open.
+Known POC limit: this screen exposes the install endpoint to every client on the
+joined Wi-Fi. Use it only on a trusted network.
 That screen joins the last saved Wi-Fi network, or the first saved network if there is no last network.
 It waits up to 30 seconds. A failure stops Wi-Fi and shows an error.
 The server answers to both `crosspoint.local` and `readmaxer-<station-mac>.local`.
@@ -164,6 +167,9 @@ After writing, the installer hashes the destination and compares it with the man
 It selects the guest as NEW through CP2's guarded writer, preserving a VALID non-guest fallback.
 It saves `/readmaxer/last-install.json`, sends the response, and restarts.
 An SD receipt failure does not undo a completed selection. `receipt_saved` reports that failure.
+Receipt replacement keeps the previous receipt until the new file is renamed.
+If replacement fails, the installer restores the previous receipt. If that restore
+also fails, the previous receipt remains at `/readmaxer/last-install.bak`.
 
 The response is HTTP 200 for `OK` or HTTP 409 for an install error:
 
@@ -172,9 +178,11 @@ The response is HTTP 200 for `OK` or HTTP 409 for an install error:
 ```
 
 `SELECTION_UNKNOWN` means the stored selection could not be read reliably.
-The reader restarts into the stored selection. The host must treat the result as unconfirmed.
+The reader restarts, but the boot result is unconfirmed. Check the reader before retrying.
 Read, write, or readback failures after the first erase can leave a partial guest slot.
-They do not select that slot. The guarded non-guest fallback remains available.
+They never select that slot and keep a CRC-valid VALID otadata entry naming the bootable fork.
+Selection failure or unknown readback after an otadata erase also keeps that VALID
+fork entry through CP2's guarded plan. The other otadata sector may have changed.
 The install screen stays open for an error or another upload. Back closes the server and Wi-Fi.
 There is no handoff-sector write or USB fallback.
 

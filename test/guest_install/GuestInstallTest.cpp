@@ -221,6 +221,7 @@ class GuestInstallProduction : public testing::Test {
     fake::guardAllowed = true;
     fake::guardHeld = fake::pending = fake::samePartition = fake::corruptReadback = false;
     fake::failWrite = fake::failRead = fake::changeSource = fake::failReceiptClose = false;
+    fake::failReceiptRename = false;
     fake::erases = fake::writes = fake::selections = 0;
     fake::selection = ota_boot::SelectionResult::Selected;
     prepare(image());
@@ -338,6 +339,18 @@ TEST_F(GuestInstallProduction, ReceiptCloseFailureDoesNotReplaceOldReceipt) {
   fake::failReceiptClose = true;
   EXPECT_FALSE(guest_install::writeReceipt(sha, Result::Ok));
   EXPECT_EQ(fake::files.at("/readmaxer/last-install.json"), (Bytes{'o', 'l', 'd'}));
+}
+
+TEST_F(GuestInstallProduction, ReceiptRenameFailureRestoresOldReceipt) {
+  fake::files["/readmaxer/last-install.json"] = {'o', 'l', 'd'};
+  fake::failReceiptRename = true;
+  EXPECT_FALSE(guest_install::writeReceipt(sha, Result::Ok));
+  EXPECT_EQ(fake::files.at("/readmaxer/last-install.json"), (Bytes{'o', 'l', 'd'}));
+  EXPECT_FALSE(fake::files.contains("/readmaxer/last-install.bak"));
+  fake::failReceiptRename = false;
+  EXPECT_TRUE(guest_install::writeReceipt(sha, Result::Ok));
+  EXPECT_NE(fake::files.at("/readmaxer/last-install.json"), (Bytes{'o', 'l', 'd'}));
+  EXPECT_FALSE(fake::files.contains("/readmaxer/last-install.bak"));
 }
 
 TEST_F(GuestInstallProduction, RealRm3Install) {

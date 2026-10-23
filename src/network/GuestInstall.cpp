@@ -168,7 +168,18 @@ bool writeReceipt(const char* shaHex, Result result) {
     return false;
   const bool written = file.write(reinterpret_cast<const uint8_t*>(text), len) == static_cast<size_t>(len);
   const bool closed = file.close();
-  return written && closed && Storage.replaceFile("/readmaxer/last-install.tmp", "/readmaxer/last-install.json");
+  if (!written || !closed) return false;
+  constexpr auto receipt = "/readmaxer/last-install.json";
+  constexpr auto backup = "/readmaxer/last-install.bak";
+  const bool hadReceipt = Storage.exists(receipt);
+  if (hadReceipt && ((Storage.exists(backup) && !Storage.remove(backup)) || !Storage.rename(receipt, backup)))
+    return false;
+  if (!Storage.rename("/readmaxer/last-install.tmp", receipt)) {
+    if (hadReceipt && !Storage.rename(backup, receipt)) LOG_ERR("GUEST", "Previous receipt remains in .bak");
+    return false;
+  }
+  if (Storage.exists(backup)) Storage.remove(backup);
+  return true;
 }
 }  // namespace guest_install
 #endif
