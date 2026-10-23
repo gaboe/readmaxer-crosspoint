@@ -9,7 +9,7 @@
 // esp_partition_write + ota_boot::switchTo (no Arduino Update class, no
 // esp_image_verify — those reject our patched image on X4 silicon).
 //
-// The SD update activity is the only path that writes an app slot.
+// The SD updater accepts host images. GuestInstall owns guest installation.
 
 namespace firmware_flash {
 

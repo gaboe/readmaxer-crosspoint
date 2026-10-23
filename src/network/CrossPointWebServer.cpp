@@ -34,6 +34,7 @@
 #include "ClippingStore.h"
 #include "CrossPointSettings.h"
 #include "FontInstaller.h"
+#include "GuestInstall.h"
 #include "OpdsServerStore.h"
 #include "ProtectedPaths.h"
 #include "SdCardFontSystem.h"
@@ -152,6 +153,38 @@ CrossPointWebServer::CrossPointWebServer() {}
 
 CrossPointWebServer::~CrossPointWebServer() { stop(); }
 
+#if FREEINK_DEVICE_X4PRO
+void CrossPointWebServer::handleGuestInstall() {
+  if (!guestInstallStatus) {
+    server->send(403, "application/json", "{\"result\":\"OPEN_INSTALL_SCREEN\"}");
+    return;
+  }
+  if (wsUploadInProgress || upload.file || fontUpload.file) {
+    server->send(409, "application/json", "{\"result\":\"UPLOAD_BUSY\"}");
+    return;
+  }
+  guestInstallStatus(true, "", guestInstallContext);
+  char sha[65];
+  const auto result = guest_install::install(sha);
+  const bool receipt = guest_install::writeReceipt(sha, result);
+  const char* name = guest_install::resultName(result);
+  if (result != guest_install::Result::Ok) LOG_ERR("GUEST", "Install: %s", name);
+  if (!receipt) LOG_ERR("GUEST", "Cannot save install receipt");
+  char response[160];
+  snprintf(response, sizeof(response), "{\"result\":\"%s\",\"sha256\":\"%s\",\"receipt_saved\":%s}", name, sha,
+           receipt ? "true" : "false");
+  server->sendHeader("Connection", "close");
+  server->send(result == guest_install::Result::Ok ? 200 : 409, "application/json", response);
+  server->client().flush();
+  if (result == guest_install::Result::Ok || result == guest_install::Result::SelectionUnknown) {
+    delay(250);
+    ESP.restart();
+    return;
+  }
+  guestInstallStatus(false, name, guestInstallContext);
+}
+#endif
+
 void CrossPointWebServer::begin() {
   if (running) {
     LOG_DBG("WEB", "Web server already running");
@@ -220,6 +253,9 @@ void CrossPointWebServer::begin() {
 
   // Upload endpoint with special handling for multipart form data
   server->on("/upload", HTTP_POST, [this] { handleUploadPost(upload); }, [this] { handleUpload(upload); });
+#if FREEINK_DEVICE_X4PRO
+  server->on("/api/readmaxer/install", HTTP_POST, [this] { handleGuestInstall(); });
+#endif
 
   // Create folder endpoint
   server->on("/mkdir", HTTP_POST, [this] { handleCreateFolder(); });

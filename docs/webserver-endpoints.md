@@ -132,13 +132,51 @@ File uploaded successfully: mybook.epub
 
 Notes:
 
-- Existing files with the same name are overwritten.
+- Existing files with the same name are refused.
 - EPUB cache data for the uploaded path is cleared after a successful upload.
 - Uploading a book file (`.epub`, `.txt`, `.md`, `.xtc`), here or through the
   WebSocket upload, marks the Library index stale, so the book appears the next
   time the Library opens. Hidden files and folders (names that start with `.`)
   don't mark it.
 - HTTP upload uses a 4 KB write buffer before flushing to the SD card.
+
+### `POST /api/readmaxer/install`
+
+X4 Pro only. The endpoint is enabled while **Settings > General > Install READMAXER** is open.
+That screen joins the last saved Wi-Fi network, or the first saved network if there is no last network.
+It waits up to 30 seconds. A failure stops Wi-Fi and shows an error.
+The server answers to both `crosspoint.local` and `readmaxer-<station-mac>.local`.
+
+The request has no body. It installs the staged files `/readmaxer/install.bin` and
+`/readmaxer/install.json`. The JSON file is limited to 512 bytes and contains a
+64-character hexadecimal `sha256` field for the complete binary.
+Use the [Rust uploader](../tools/install-guest/README.md) to stage the files.
+
+Before any erase, the installer checks the complete file's SHA-256, CP2 image rules,
+project name, guest and host marker counts, device MAC marker, destination size,
+running-slot confirmation, and CP2 `AppWriteGuard`.
+A gate refusal leaves both application slots and otadata unchanged.
+The write runs synchronously. Other uploads cannot run during the install.
+An upload already in progress returns HTTP 409 with `UPLOAD_BUSY`.
+Outside the install screen, the endpoint returns HTTP 403 with `OPEN_INSTALL_SCREEN`.
+
+After writing, the installer hashes the destination and compares it with the manifest.
+It selects the guest as NEW through CP2's guarded writer, preserving a VALID non-guest fallback.
+It saves `/readmaxer/last-install.json`, sends the response, and restarts.
+An SD receipt failure does not undo a completed selection. `receipt_saved` reports that failure.
+
+The response is HTTP 200 for `OK` or HTTP 409 for an install error:
+
+```json
+{"result":"OK","sha256":"<64 hexadecimal characters>","receipt_saved":true}
+```
+
+`SELECTION_UNKNOWN` means the stored selection could not be read reliably.
+The reader restarts into the stored selection. The host must treat the result as unconfirmed.
+Read, write, or readback failures after the first erase can leave a partial guest slot.
+They do not select that slot. The guarded non-guest fallback remains available.
+The install screen stays open for an error or another upload. Back closes the server and Wi-Fi.
+There is no handoff-sector write or USB fallback.
 
 ### `POST /mkdir`
 

@@ -20,6 +20,7 @@
 #include "ClockSettingsActivity.h"
 #include "CrossPointSettings.h"
 #include "FontDownloadActivity.h"
+#include "GuestInstallActivity.h"
 #include "HomeButtonSettingsActivity.h"
 #include "KOReaderSettingsActivity.h"
 #include "KeyboardLayoutsActivity.h"
@@ -143,6 +144,9 @@ void SettingsActivity::rebuildSettings() {
     addAction(SettingsSection::General, StrId::STR_SD_FIRMWARE_UPDATE, SettingAction::SdFirmwareUpdate);
   }
   addAction(SettingsSection::General, StrId::STR_ABOUT, SettingAction::About);
+#if FREEINK_DEVICE_X4PRO
+  addAction(SettingsSection::General, StrId::STR_INSTALL_READMAXER, SettingAction::GuestInstall);
+#endif
   rebuildRowItems();
 }
 
@@ -345,6 +349,18 @@ void SettingsActivity::toggleSelectedSetting() {
       case SettingAction::SdFirmwareUpdate:
         startActivityForResult(std::make_unique<SdFirmwareUpdateActivity>(renderer, mappedInput), resultHandler);
         break;
+#if FREEINK_DEVICE_X4PRO
+      case SettingAction::GuestInstall: {
+        auto activity = makeUniqueNoThrow<GuestInstallActivity>(renderer, mappedInput);
+        if (!activity) {
+          LOG_ERR("SETTINGS", "OOM: GuestInstallActivity (%u bytes)",
+                  static_cast<unsigned>(sizeof(GuestInstallActivity)));
+          return;
+        }
+        startActivityForResult(std::move(activity), resultHandler);
+        break;
+      }
+#endif
       case SettingAction::DownloadFonts:
         startActivityForResult(std::make_unique<FontDownloadActivity>(renderer, mappedInput),
                                [this](const ActivityResult&) {

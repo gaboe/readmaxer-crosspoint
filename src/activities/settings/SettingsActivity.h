@@ -24,6 +24,9 @@ enum class SettingAction {
   Bluetooth,
   ClearCache,
   SdFirmwareUpdate,
+#if FREEINK_DEVICE_X4PRO
+  GuestInstall,
+#endif
   Language,
   DownloadFonts,
   TextSettings,
