@@ -84,19 +84,48 @@ TEST(GuestSlot, CountsMarkersAcrossChunksAndAfterPartialPrefixes) {
 
 TEST(GuestSlot, HostMarkerRequiresExactlyOneOccurrence) {
   host_tag::Scanner scanner;
-  EXPECT_EQ(host_tag::classify(true, false, scanner, false), host_tag::Identity::WrongFork);
-  EXPECT_EQ(host_tag::classify(false, false, scanner, true), host_tag::Identity::Guest);
+  EXPECT_EQ(host_tag::classify(true, false, scanner.count(), 0), host_tag::Identity::WrongFork);
+  EXPECT_EQ(host_tag::classify(false, false, scanner.count(), 1), host_tag::Identity::Guest);
   const char* tag = host_tag::TAG;
   scanner.feed(reinterpret_cast<const uint8_t*>(tag), 3);
   scanner.feed(reinterpret_cast<const uint8_t*>(tag + 3), std::strlen(tag) - 3);
   EXPECT_TRUE(scanner.exactlyOne());
-  EXPECT_EQ(host_tag::classify(true, false, scanner, false), host_tag::Identity::Host);
-  EXPECT_NE(host_tag::classify(true, false, scanner, true), host_tag::Identity::Host);
-  EXPECT_EQ(host_tag::classify(false, false, scanner, true), host_tag::Identity::WrongBoard);
-  EXPECT_EQ(host_tag::classify(true, true, scanner, false), host_tag::Identity::WrongBoard);
+  EXPECT_EQ(host_tag::classify(true, false, scanner.count(), 0), host_tag::Identity::Host);
+  EXPECT_NE(host_tag::classify(true, false, scanner.count(), 1), host_tag::Identity::Host);
+  EXPECT_EQ(host_tag::classify(false, false, scanner.count(), 1), host_tag::Identity::WrongBoard);
+  EXPECT_EQ(host_tag::classify(true, true, scanner.count(), 0), host_tag::Identity::WrongBoard);
   scanner.feed(reinterpret_cast<const uint8_t*>(tag), std::strlen(tag));
   EXPECT_FALSE(scanner.exactlyOne());
-  EXPECT_EQ(host_tag::classify(true, false, scanner, false), host_tag::Identity::WrongFork);
+  EXPECT_EQ(host_tag::classify(true, false, scanner.count(), 0), host_tag::Identity::WrongFork);
+}
+
+TEST(GuestSlot, SdGateEnumeratesHostAndGuestMarkerCounts) {
+  for (unsigned hosts : {0u, 1u, 2u}) {
+    for (unsigned guests : {0u, 1u, 2u, 300u}) {
+      host_tag::Scanner host;
+      guest_slot::Scanner guest;
+      for (unsigned i = 0; i < hosts; ++i)
+        host.feed(reinterpret_cast<const uint8_t*>(host_tag::TAG), std::strlen(host_tag::TAG));
+      const char marker[] = "READMAXER-GUEST-V1;";
+      for (unsigned i = 0; i < guests; ++i)
+        for (const char* c = marker; *c; ++c) guest.feed(reinterpret_cast<const uint8_t*>(c), 1);
+      for (bool matched : {false, true}) {
+        for (bool mismatch : {false, true}) {
+          const auto identity = host_tag::classify(matched, mismatch, host.count(), guest.count());
+          EXPECT_EQ(identity == host_tag::Identity::Host, matched && !mismatch && hosts == 1 && guests == 0)
+              << "host=" << hosts << " guest=" << guests;
+        }
+      }
+    }
+  }
+}
+
+TEST(GuestSlot, OneHostAndTwoGuestMarkersNeverClassifyAsHost) {
+  EXPECT_NE(host_tag::classify(true, false, 1, 2), host_tag::Identity::Host);
+}
+
+TEST(GuestSlot, OneHostAndOneGuestMarkerNeverClassifyAsHost) {
+  EXPECT_NE(host_tag::classify(true, false, 1, 1), host_tag::Identity::Host);
 }
 
 TEST(GuestSlot, OptionalProbeImageIsNotGuest) {

@@ -31,11 +31,17 @@ SelectEntry entry(uint32_t seq, uint32_t state) {
 
 void apply(Otadata& otadata, const EntryWrite& write) { otadata[write.sector] = write.entry; }
 
-EntryWrite planSelect(const Otadata& entries, uint32_t slot, uint32_t state) {
+BootableSlots forkSlots(uint32_t running, bool otherFork = false) {
+  BootableSlots images{};
+  images.slots[running] = true;
+  images.slots[1u - running] = otherFork;
+  return images;
+}
+
+EntryWrite selectWrite(const Otadata& entries, uint32_t running, uint32_t slot, uint32_t state,
+                       bool otherFork = false) {
   EntryWrite write{};
-  const int active = activeEntry(entries);
-  const uint32_t running = active < 0 ? slot : entrySlot(entries[active]);
-  EXPECT_TRUE(ota_boot::planSelect(entries, running, slot, state, write));
+  EXPECT_TRUE(ota_boot::planSelect(entries, forkSlots(running, otherFork), slot, state, write));
   return write;
 }
 
@@ -43,11 +49,11 @@ EntryWrite planSelect(const Otadata& entries, uint32_t slot, uint32_t state) {
 // with no factory partition: a PENDING_VERIFY entry that reaches another boot
 // is aborted, a NEW entry becomes PENDING_VERIFY, and blank otadata boots ota_0.
 uint32_t bootloaderSelect(Otadata& otadata, bool rollback) {
-  int active = activeEntry(otadata);
-  if (rollback && active >= 0 && otadata[active].ota_state == kPendingVerify) {
-    otadata[active].ota_state = kOtaImgAborted;
-    active = activeEntry(otadata);
+  if (rollback) {
+    for (auto& e : otadata)
+      if (e.ota_state == kPendingVerify) e.ota_state = kOtaImgAborted;
   }
+  int active = activeEntry(otadata);
   if (active < 0) return 0;
   if (rollback && otadata[active].ota_state == kOtaImgNew) otadata[active].ota_state = kPendingVerify;
   return entrySlot(otadata[active]);
@@ -56,18 +62,23 @@ uint32_t bootloaderSelect(Otadata& otadata, bool rollback) {
 // What the fork does in setup(), with the other slot holding an app image.
 BootPlan forkSetup(Otadata& otadata, uint32_t runningSlot, bool deepSleepWake = false) {
   const BootPlan plan = planBoot(otadata, runningSlot, deepSleepWake);
-  if (plan.armFallback) apply(otadata, planSelect(otadata, 1 - runningSlot, kOtaImgValid));
+  if (plan.armFallback) {
+    EntryWrite write{};
+    if (ota_boot::planSelect(otadata, forkSlots(runningSlot, true), 1 - runningSlot, kOtaImgValid, write))
+      apply(otadata, write);
+  }
   return plan;
 }
 
 void forkHomeRendered(Otadata& otadata, uint32_t runningSlot, const BootPlan& plan) {
-  if (plan.confirmAfterHome) apply(otadata, planSelect(otadata, runningSlot, kOtaImgValid));
+  if (plan.confirmAfterHome) apply(otadata, selectWrite(otadata, runningSlot, runningSlot, kOtaImgValid, true));
 }
 
 // keepRunningSlot() before a deliberate sleep or idle while confirmation is pending.
 void forkKeepsRunningSlot(Otadata& otadata, uint32_t runningSlot, const BootPlan& plan) {
   EntryWrite write{};
-  if (plan.confirmAfterHome && planKeepRunningSlot(otadata, runningSlot, write) == KeepPlan::Write)
+  if (plan.confirmAfterHome &&
+      planKeepRunningSlot(otadata, forkSlots(runningSlot, true), runningSlot, write) == KeepPlan::Write)
     apply(otadata, write);
 }
 
@@ -103,21 +114,20 @@ TEST(OtaSlotModel, ActiveEntryIgnoresBlankBadCrcAbortedAndInvalid) {
 
 TEST(OtaSlotModel, PlanSelectWritesTheInactiveSectorWithTheNextSeqForTheSlot) {
   Otadata otadata = {entry(3, kOtaImgValid), blankEntry()};  // seq 3 selects slot 0
-  const EntryWrite toSlot1 = planSelect(otadata, 1, kOtaImgNew);
+  const EntryWrite toSlot1 = selectWrite(otadata, 0, 1, kOtaImgNew);
   EXPECT_EQ(toSlot1.sector, 1u);
   EXPECT_EQ(toSlot1.entry.ota_seq, 4u);
   EXPECT_EQ(toSlot1.entry.ota_state, kOtaImgNew);
   EXPECT_EQ(toSlot1.entry.crc, computeSeqCrc(4));
   for (const uint8_t b : toSlot1.entry.seq_label) EXPECT_EQ(b, 0xFF);
 
-  const EntryWrite toSlot0 = planSelect(otadata, 0, kOtaImgValid);
+  const EntryWrite toSlot0 = selectWrite(otadata, 0, 0, kOtaImgValid);
   EXPECT_EQ(toSlot0.sector, 1u);
   EXPECT_EQ(toSlot0.entry.ota_seq, 5u);
 
   Otadata blank = {blankEntry(), blankEntry()};
-  const EntryWrite fromBlank = planSelect(blank, 1, kOtaImgValid);
-  EXPECT_EQ(fromBlank.sector, 0u);
-  EXPECT_EQ(fromBlank.entry.ota_seq, 2u);
+  EntryWrite fromBlank{};
+  EXPECT_FALSE(ota_boot::planSelect(blank, forkSlots(0, true), 1, kOtaImgValid, fromBlank));
 }
 
 TEST(OtaSlotModel, GuestSwitchIsNewAndPreservesForkSectorOnTornWrite) {
@@ -126,7 +136,7 @@ TEST(OtaSlotModel, GuestSwitchIsNewAndPreservesForkSectorOnTornWrite) {
       Otadata data = {blankEntry(), blankEntry()};
       data[forkSector] = entry(forkSlot + 1, kOtaImgValid);
       const auto forkEntry = data[forkSector];
-      const EntryWrite guestWrite = planSelect(data, 1 - forkSlot, kOtaImgNew);
+      const EntryWrite guestWrite = selectWrite(data, forkSlot, 1 - forkSlot, kOtaImgNew);
       EXPECT_EQ(guestWrite.sector, 1 - forkSector);
       EXPECT_EQ(guestWrite.entry.ota_state, kOtaImgNew);
       EXPECT_EQ(entrySlot(guestWrite.entry), 1 - forkSlot);
@@ -143,13 +153,13 @@ TEST(OtaSlotModel, ArmedFallbackNeverPermitsGuestSwitchToEraseForkSector) {
     for (uint32_t forkSector = 0; forkSector < kEntrySectors; ++forkSector) {
       Otadata data = {blankEntry(), blankEntry()};
       data[forkSector] = entry(forkSlot + 1, kOtaImgValid);
-      const EntryWrite armed = planSelect(data, 1 - forkSlot, kOtaImgValid);
+      const EntryWrite armed = selectWrite(data, forkSlot, 1 - forkSlot, kOtaImgValid);
       apply(data, armed);
       ASSERT_EQ(checkRunningSlot(data, forkSlot), SlotCheck::FellBack);
       EXPECT_FALSE(guest_slot::canSwitch(checkRunningSlot(data, forkSlot), true));
       EXPECT_FALSE(guest_slot::canSwitch(checkRunningSlot(data, forkSlot), false));
       EntryWrite safe{};
-      ASSERT_TRUE(ota_boot::planSelect(data, forkSlot, 1 - forkSlot, kOtaImgNew, safe));
+      ASSERT_TRUE(ota_boot::planSelect(data, forkSlots(forkSlot), 1 - forkSlot, kOtaImgNew, safe));
       EXPECT_NE(safe.sector, forkSector);
       EXPECT_EQ(data[forkSector].ota_state, kOtaImgValid);
     }
@@ -164,12 +174,12 @@ TEST(OtaSlotModel, EveryWritePlanPreservesNewestValidRunningEntry) {
       data[1u - forkSector] = entry(forkSlot + 4u, kOtaImgValid);
       const auto protectedEntry = data[forkSector];
       EntryWrite write{};
-      ASSERT_EQ(planKeepRunningSlot(data, forkSlot, write), KeepPlan::Write);
+      ASSERT_EQ(planKeepRunningSlot(data, forkSlots(forkSlot), forkSlot, write), KeepPlan::Write);
       EXPECT_EQ(write.sector, 1u - forkSector);
       apply(data, write);
       EXPECT_EQ(std::memcmp(&data[forkSector], &protectedEntry, sizeof(protectedEntry)), 0);
       for (uint32_t target = 0; target < kSlotCount; ++target) {
-        ASSERT_TRUE(ota_boot::planSelect(data, forkSlot, target, kOtaImgNew, write));
+        ASSERT_TRUE(ota_boot::planSelect(data, forkSlots(forkSlot), target, kOtaImgNew, write));
         EXPECT_EQ(write.sector, 1u - forkSector);
       }
     }
@@ -182,14 +192,14 @@ TEST(OtaSlotModel, SelectRefusesBlankAndWrappedSequences) {
       Otadata data = {blankEntry(), blankEntry()};
       data[sector] = entry(0xFFFFFFFEu, kOtaImgValid);
       EntryWrite write{};
-      EXPECT_FALSE(ota_boot::planSelect(data, slot, 0, kOtaImgNew, write));
-      EXPECT_FALSE(ota_boot::planSelect(data, slot, 1, kOtaImgNew, write));
-      EXPECT_EQ(planKeepRunningSlot(data, 1u - entrySlot(data[sector]), write), KeepPlan::Unsafe);
+      EXPECT_FALSE(ota_boot::planSelect(data, forkSlots(slot), 0, kOtaImgNew, write));
+      EXPECT_FALSE(ota_boot::planSelect(data, forkSlots(slot), 1, kOtaImgNew, write));
+      EXPECT_EQ(planKeepRunningSlot(data, forkSlots(slot), 1u - entrySlot(data[sector]), write), KeepPlan::Unsafe);
     }
   }
   Otadata lastUsable = {entry(0xFFFFFFFDu, kOtaImgValid), blankEntry()};
   EntryWrite write{};
-  ASSERT_TRUE(ota_boot::planSelect(lastUsable, 0, 1, kOtaImgNew, write));
+  ASSERT_TRUE(ota_boot::planSelect(lastUsable, forkSlots(0), 1, kOtaImgNew, write));
   EXPECT_EQ(write.entry.ota_seq, 0xFFFFFFFEu);
   apply(lastUsable, write);
   EXPECT_EQ(activeEntry(lastUsable), 1);
@@ -241,23 +251,23 @@ TEST(OtaSlotModel, KeepRunningSlotReselectsTheRunningSlotAsNew) {
   // Armed: the active entry selects the other slot.
   Otadata armed = {entry(3, kOtaImgValid), entry(2, kPendingVerify)};
   EntryWrite write{};
-  ASSERT_EQ(planKeepRunningSlot(armed, 1, write), KeepPlan::Write);
+  ASSERT_EQ(planKeepRunningSlot(armed, forkSlots(1, true), 1, write), KeepPlan::Write);
   EXPECT_EQ(write.sector, 1u);
   EXPECT_EQ(write.entry.ota_seq, 4u);
   EXPECT_EQ(write.entry.ota_state, kOtaImgNew);
 
   // Pending verify under rollback: rewritten in place, the other sector keeps its entry.
   Otadata pending = {entry(3, kOtaImgValid), entry(4, kPendingVerify)};
-  ASSERT_EQ(planKeepRunningSlot(pending, 1, write), KeepPlan::Write);
+  ASSERT_EQ(planKeepRunningSlot(pending, forkSlots(1, true), 1, write), KeepPlan::Write);
   EXPECT_EQ(write.sector, 1u);
   EXPECT_EQ(write.entry.ota_seq, 4u);
   EXPECT_EQ(write.entry.ota_state, kOtaImgNew);
   EXPECT_EQ(write.entry.crc, computeSeqCrc(4));
 
   Otadata ownNew = {entry(3, kOtaImgValid), entry(4, kOtaImgNew)};
-  EXPECT_EQ(planKeepRunningSlot(ownNew, 1, write), KeepPlan::NoWrite);
+  EXPECT_EQ(planKeepRunningSlot(ownNew, forkSlots(1, true), 1, write), KeepPlan::NoWrite);
   Otadata ownValid = {entry(3, kOtaImgValid), entry(4, kOtaImgValid)};
-  EXPECT_EQ(planKeepRunningSlot(ownValid, 1, write), KeepPlan::NoWrite);
+  EXPECT_EQ(planKeepRunningSlot(ownValid, forkSlots(1, true), 1, write), KeepPlan::NoWrite);
 }
 
 TEST_P(FallbackBothRollbackSettings, CrashBeforeHomeBootsTheOtherSlotOnEveryLaterReset) {
@@ -290,15 +300,16 @@ TEST_P(FallbackBothRollbackSettings, HomeRenderKeepsTheForkSelected) {
   }
 }
 
-TEST_P(FallbackBothRollbackSettings, BlankOtadataAfterUsbFlashArmsAndConfirms) {
+TEST_P(FallbackBothRollbackSettings, BlankOtadataRefusesWritesWithoutAValidFork) {
   const bool rollback = GetParam();
   Otadata otadata = {blankEntry(), blankEntry()};
   ASSERT_EQ(bootloaderSelect(otadata, rollback), 0u);
   const BootPlan plan = forkSetup(otadata, 0);
   ASSERT_TRUE(plan.armFallback);
-  forkHomeRendered(otadata, 0, plan);
+  EntryWrite write{};
+  EXPECT_FALSE(ota_boot::planSelect(otadata, forkSlots(0, true), 0, kOtaImgValid, write));
   EXPECT_EQ(bootloaderSelect(otadata, rollback), 0u);
-  EXPECT_EQ(checkRunningSlot(otadata, 0), SlotCheck::Confirmed);
+  EXPECT_EQ(checkRunningSlot(otadata, 0), SlotCheck::Unconfirmed);
 }
 
 TEST_P(FallbackBothRollbackSettings, SleepBeforeHomeWakesTheForkAndAPreHomeCrashStillFallsBack) {
@@ -345,14 +356,14 @@ TEST_P(FallbackBothRollbackSettings, SleepBeforeHomeThenHomeConfirms) {
 
 INSTANTIATE_TEST_SUITE_P(Rollback, FallbackBothRollbackSettings, ::testing::Bool());
 
-TEST(OtaSlotModel, NewFallbackEntryIsAbortedWhenRollbackIsOn) {
+TEST(OtaSlotModel, AbortedNewFallbackRetainsTheOlderValidFork) {
   // Why the fallback writes VALID: a NEW entry for an image that never marks
   // itself valid is aborted on its second boot, and the crashing fork returns.
   Otadata otadata = {entry(1, kOtaImgValid), entry(2, kOtaImgNew)};
   ASSERT_EQ(bootloaderSelect(otadata, true), 1u);
-  apply(otadata, planSelect(otadata, 0, kOtaImgNew));
+  apply(otadata, selectWrite(otadata, 1, 0, kOtaImgNew, true));
   EXPECT_EQ(bootloaderSelect(otadata, true), 0u);
-  EXPECT_EQ(bootloaderSelect(otadata, true), 1u);
+  EXPECT_EQ(bootloaderSelect(otadata, true), 0u);
 }
 
 namespace {
@@ -446,7 +457,7 @@ std::vector<uint8_t> appImage(uint16_t chip, const std::vector<uint32_t>& segmen
                               uint32_t firstAddress = 0x3C000020) {
   std::vector<uint8_t> image(24, 0);
   image[0] = 0xE9;
-  image[1] = static_cast<uint8_t>(segmentLens.size());
+  image[1] = static_cast<uint8_t>(segmentLens.size() + 1);
   std::memcpy(&image[12], &chip, sizeof(chip));
   image[23] = shaAppended ? 1 : 0;
   uint8_t checksum = 0xEF;
@@ -457,12 +468,23 @@ std::vector<uint8_t> appImage(uint16_t chip, const std::vector<uint32_t>& segmen
     std::memcpy(seg + 4, &len, sizeof(len));
     image.insert(image.end(), seg, seg + 8);
     for (uint32_t i = 0; i < len; ++i) {
-      const auto b = static_cast<uint8_t>(i * 7 + len);
+      uint8_t b = static_cast<uint8_t>(i * 7 + len);
+      if (image.size() - i == 32 && i < 256) {
+        b = 0;
+        if (i < 4) b = static_cast<uint8_t>(0xABCD5432u >> (i * 8));
+      }
       image.push_back(b);
       checksum ^= b;
     }
     address = 0x40374000;
   }
+  const uint32_t mappedAddress = 0x42000000u + (image.size() + 8) % 65536;
+  const uint32_t mappedLength = 4;
+  const auto* addressBytes = reinterpret_cast<const uint8_t*>(&mappedAddress);
+  const auto* lengthBytes = reinterpret_cast<const uint8_t*>(&mappedLength);
+  image.insert(image.end(), addressBytes, addressBytes + 4);
+  image.insert(image.end(), lengthBytes, lengthBytes + 4);
+  image.insert(image.end(), 4, 0);
   image.resize((image.size() + 16) & ~static_cast<size_t>(15), 0);
   image.back() = checksum;
   if (shaAppended) {
@@ -499,8 +521,8 @@ bool holds(std::vector<uint8_t> slot, uint32_t slotSize, uint16_t chip = kChipS3
   const auto visit = [](const uint8_t* data, uint32_t len, void* ctx) {
     static_cast<guest_slot::Scanner*>(ctx)->feed(data, len);
   };
-  return slotHoldsAppImage(readVector, &slot, slotSize, chip, hasher, buf, sizeof(buf), scanner ? visit : nullptr,
-                           scanner);
+  return checkAppImage(readVector, &slot, slotSize, chip, hasher, buf, sizeof(buf), scanner ? visit : nullptr,
+                       scanner) == ImageCheck::Ok;
 }
 
 }  // namespace
@@ -517,11 +539,28 @@ TEST(OtaSlotModel, Sha256MatchesTheFipsVector) {
 }
 
 TEST(OtaSlotModel, SlotImageCheckAcceptsAWellFormedImage) {
-  const auto image = appImage(kChipS3, {100, 4096, 8}, true);
+  const auto image = appImage(kChipS3, {256, 4096, 8}, true);
   EXPECT_TRUE(holds(image, static_cast<uint32_t>(image.size())));
   EXPECT_TRUE(holds(image, 0x10000));  // erased flash after the image
-  EXPECT_TRUE(holds(appImage(kChipS3, {64}, true), 0x1000));
-  EXPECT_TRUE(holds(appImage(kChipS3, {64}, true, 0x42000020), 0x1000));
+  EXPECT_TRUE(holds(appImage(kChipS3, {256}, true), 0x1000));
+  EXPECT_FALSE(holds(appImage(kChipS3, {256}, true, 0x42000020), 0x1000));
+}
+
+TEST(OtaSlotModel, MappedSegmentMustMatchFlashMmuOffset) {
+  const auto aligned = appImage(kChipS3, {256}, true, 0x3C000020);
+  const auto misaligned = appImage(kChipS3, {256}, true, 0x3C000024);
+  EXPECT_TRUE(holds(aligned, static_cast<uint32_t>(aligned.size())));
+  EXPECT_FALSE(holds(misaligned, static_cast<uint32_t>(misaligned.size())));
+
+  SelectEntry entries[2] = {entry(3, kOtaImgValid), entry(5, kPendingVerify)};
+  const BootableSlots sound{{true, false}};
+  EntryWrite fallback{};
+  ASSERT_EQ(planKeepRunningSlot(entries, sound, 0, fallback), KeepPlan::Write);
+  EXPECT_EQ(fallback.sector, 1u);
+  SelectEntry afterErase[2] = {entries[0], entries[1]};
+  std::memset(&afterErase[fallback.sector], 0xFF, sizeof(SelectEntry));
+  EXPECT_EQ(afterErase[0].ota_state, kOtaImgValid);
+  EXPECT_TRUE(appEraseIsSafe(afterErase, sound, 1));
 }
 
 TEST(OtaSlotModel, AuthenticatedGuestImageNeedsProjectAndOneMarker) {
@@ -530,27 +569,27 @@ TEST(OtaSlotModel, AuthenticatedGuestImageNeedsProjectAndOneMarker) {
   std::memcpy(image.data() + 32, &magic, sizeof(magic));
   std::memcpy(image.data() + 48, "1.2.3", 6);
   std::memcpy(image.data() + 80, "readmaxer-xteink-x4pro", sizeof("readmaxer-xteink-x4pro"));
-  std::memcpy(image.data() + 200, "READMAXER-GUEST-V1;", sizeof("READMAXER-GUEST-V1;") - 1);
+  std::memcpy(image.data() + 240, "READMAXER-GUEST-V1;", sizeof("READMAXER-GUEST-V1;") - 1);
   uint8_t checksum = 0xEF;
   for (size_t i = 32; i < 288; ++i) checksum ^= image[i];
-  image[303] = checksum;
+  image[image.size() - 33] = checksum;
   Sha256 sha;
-  sha.update(image.data(), 304);
+  sha.update(image.data(), image.size() - 32);
   uint8_t digest[32];
   sha.finish(digest);
-  std::memcpy(image.data() + 304, digest, sizeof(digest));
+  std::memcpy(image.data() + image.size() - 32, digest, sizeof(digest));
   guest_slot::Scanner scanner;
   ASSERT_TRUE(holds(image, 4096, kChipS3, &scanner));
   const auto guest = guest_slot::inspectHeader(readVector, &image, image.size());
   EXPECT_TRUE(guest.installed);
   EXPECT_STREQ(guest.version, "1.2.3");
   EXPECT_TRUE(scanner.exactlyOne());
-  image[200] ^= 1;
+  image[240] ^= 1;
   EXPECT_FALSE(holds(image, 4096));
 }
 
 TEST(OtaSlotModel, SlotImageCheckRejectsCorruptChecksumHashAndFirstSegment) {
-  const auto image = appImage(kChipS3, {100, 4096, 8}, true);
+  const auto image = appImage(kChipS3, {256, 4096, 8}, true);
   const auto slotSize = static_cast<uint32_t>(image.size());
 
   auto segmentByte = image;
@@ -574,28 +613,128 @@ TEST(OtaSlotModel, SlotImageCheckRejectsCorruptChecksumHashAndFirstSegment) {
   header[2] ^= 0x01;  // flash mode byte: covered only by the hash
   EXPECT_FALSE(holds(header, slotSize));
 
-  EXPECT_FALSE(holds(appImage(kChipS3, {64}, false), 0x1000));             // no SHA-256 trailer
-  EXPECT_FALSE(holds(appImage(kChipS3, {62}, true), 0x1000));              // unaligned segment length
-  EXPECT_FALSE(holds(appImage(kChipS3, {64}, true, 0x3FC9E100), 0x1000));  // DRAM first
-  EXPECT_FALSE(holds(appImage(kChipS3, {64}, true, 0x40374000), 0x1000));  // IRAM first
+  EXPECT_FALSE(holds(appImage(kChipS3, {256}, false), 0x1000));             // no SHA-256 trailer
+  EXPECT_FALSE(holds(appImage(kChipS3, {62}, true), 0x1000));               // unaligned segment length
+  EXPECT_FALSE(holds(appImage(kChipS3, {256}, true, 0x3FC9E100), 0x1000));  // DRAM first
+  EXPECT_FALSE(holds(appImage(kChipS3, {256}, true, 0x40374000), 0x1000));  // IRAM first
 }
 TEST(OtaSlotModel, SlotImageCheckRejectsErasedWrongChipAndTruncatedSlots) {
   EXPECT_FALSE(holds(std::vector<uint8_t>(4096, 0xFF), 4096));
-  EXPECT_FALSE(holds(appImage(5, {100}, true), 4096));
+  EXPECT_FALSE(holds(appImage(5, {256}, true), 4096));
 
-  auto noSegments = appImage(kChipS3, {100}, true);
+  auto noSegments = appImage(kChipS3, {256}, true);
   noSegments[1] = 0;
   EXPECT_FALSE(holds(noSegments, 4096));
 
-  auto tooManySegments = appImage(kChipS3, {100}, true);
+  auto tooManySegments = appImage(kChipS3, {256}, true);
   tooManySegments[1] = 17;
   EXPECT_FALSE(holds(tooManySegments, 4096));
 
-  const auto image = appImage(kChipS3, {100, 4096}, true);
+  const auto image = appImage(kChipS3, {256, 4096}, true);
   EXPECT_FALSE(holds(image, static_cast<uint32_t>(image.size() - 1)));
 
   // A segment length read from erased flash runs past the slot.
-  auto erasedTail = appImage(kChipS3, {100, 4096}, true);
-  std::memset(&erasedTail[24 + 8 + 100], 0xFF, erasedTail.size() - (24 + 8 + 100));
+  auto erasedTail = appImage(kChipS3, {256, 4096}, true);
+  std::memset(&erasedTail[24 + 8 + 256], 0xFF, erasedTail.size() - (24 + 8 + 256));
   EXPECT_FALSE(holds(erasedTail, static_cast<uint32_t>(erasedTail.size())));
+}
+
+TEST(OtaSlotModel, BootloaderImageRules) {
+  const auto good = appImage(kChipS3, {256, 64}, true);
+  struct Rule {
+    const char* name;
+    size_t offset;
+    uint32_t value;
+    size_t width;
+    bool accepted;
+  };
+  const Rule rules[] = {
+      {"magic", 0, 0, 1, false},
+      {"chip", 12, 5, 2, false},
+      {"minimum revision zero", 15, 0, 2, true},
+      {"minimum revision one", 15, 1, 2, false},
+      {"maximum revision inclusive", 17, 99, 2, true},
+      {"maximum revision too low", 17, 98, 2, false},
+      {"maximum revision unset", 17, 65535, 2, true},
+      {"legacy min revision ignored by IDF", 14, 255, 1, true},
+      {"no segments", 1, 0, 1, false},
+      {"missing DROM", 24, 0x42000020, 4, false},
+      {"missing IROM", 360, 0x40374000, 4, false},
+      {"empty mapped segment", 364, 0, 4, false},
+      {"too many segments", 1, 17, 1, false},
+      {"descriptor magic", 32, 0, 4, false},
+      {"descriptor truncated", 28, 252, 4, false},
+      {"block minimum zero", 208, 0, 2, true},
+      {"block minimum unset", 208, 65535, 2, true},
+      {"block minimum too high", 208, 1, 2, false},
+      {"block maximum inclusive", 210, 199, 2, true},
+      {"block maximum too low", 210, 198, 2, false},
+      {"block maximum unset", 210, 65535, 2, true},
+      {"legacy page size", 212, 0, 1, true},
+      {"64 KiB page size", 212, 16, 1, true},
+      {"32 KiB page size", 212, 15, 1, false},
+      {"page shift overflow", 212, 32, 1, false},
+      {"mapped aligned", 24, 0x3C000020, 4, true},
+      {"mapped misaligned", 24, 0x3C000024, 4, false},
+      {"mapped upper range", 288, 0x43FF0128, 4, true},
+      {"dram", 288, 0x3FC88000, 4, true},
+      {"dram end", 288, 0x3FCDB6C0, 4, true},
+      {"dram overlaps loader alias", 288, 0x3FCDB6C4, 4, false},
+      {"loader dram alias", 288, 0x3FCDB700, 4, false},
+      {"bootloader data", 288, 0x3FCE2700, 4, false},
+      {"bootloader stack", 288, 0x3FCE9700, 4, false},
+      {"iram", 288, 0x40370000, 4, true},
+      {"iram end", 288, 0x403CB6C0, 4, true},
+      {"iram overlaps loader", 288, 0x403CB6C4, 4, false},
+      {"loader iram", 288, 0x403CB700, 4, false},
+      {"static data iram alias", 288, 0x403D2700, 4, false},
+      {"rtc fast", 288, 0x600FE000, 4, true},
+      {"rtc fast end", 288, 0x600FFFC0, 4, true},
+      {"rtc fast overflow", 288, 0x600FFFC4, 4, false},
+      {"rtc slow", 288, 0x50000000, 4, true},
+      {"rtc slow end", 288, 0x50001FC0, 4, true},
+      {"rtc slow overflow", 288, 0x50001FC4, 4, false},
+      {"padding", 288, 0, 4, true},
+      {"reserved non-load", 288, 4, 4, true},
+      {"peripheral", 288, 0x60000000, 4, false},
+      {"outside RAM", 288, 0x3FC87FFC, 4, false},
+      {"unaligned RAM", 288, 0x3FC88001, 4, false},
+      {"address overflow", 288, 0xFFFFFFFC, 4, false},
+      {"zero length", 292, 0, 4, false},  // Changing length without moving the checksum is invalid.
+      {"unaligned length", 292, 63, 4, false},
+      {"16 MiB length", 292, 0x1000000, 4, false},
+      {"length beyond slot", 292, 4096, 4, false},
+      {"missing SHA", 23, 0, 1, false},
+  };
+  ASSERT_TRUE(holds(good, good.size()));
+  for (const auto& rule : rules) {
+    SCOPED_TRACE(rule.name);
+    auto image = good;
+    std::memcpy(image.data() + rule.offset, &rule.value, rule.width);
+    uint8_t checksum = 0xEF;
+    for (size_t i = 32; i < 288; ++i) checksum ^= image[i];
+    for (size_t i = 296; i < 360; ++i) checksum ^= image[i];
+    image[image.size() - 33] = checksum;
+    Sha256 sha;
+    sha.update(image.data(), image.size() - 32);
+    uint8_t digest[32];
+    sha.finish(digest);
+    std::memcpy(image.data() + image.size() - 32, digest, 32);
+    EXPECT_EQ(holds(image, image.size()), rule.accepted);
+  }
+  EXPECT_TRUE(holds(appImage(kChipS3, {256, 0}, true), 4096));
+  EXPECT_TRUE(holds(appImage(kChipS3, std::vector<uint32_t>(15, 256), true), 8192));
+  for (const uint32_t address : {0x43FE0128u, 0x43FF0128u}) {
+    auto image = appImage(kChipS3, {256, 65536}, true);
+    std::memcpy(image.data() + 288, &address, 4);
+    Sha256 sha;
+    sha.update(image.data(), image.size() - 32);
+    uint8_t digest[32];
+    sha.finish(digest);
+    std::memcpy(image.data() + image.size() - 32, digest, 32);
+    EXPECT_EQ(holds(image, image.size()), address == 0x43FE0128u);
+  }
+  EXPECT_FALSE(holds(good, 31));
+  EXPECT_FALSE(holds(good, 290));
+  EXPECT_FALSE(holds(good, good.size() - 32));
 }

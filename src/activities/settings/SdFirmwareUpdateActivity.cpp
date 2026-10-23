@@ -168,6 +168,11 @@ void SdFirmwareUpdateActivity::performUpdate() {
   // flashFromSdPath re-validates at flash time (TOCTOU): SD is removable, so
   // the pre-confirmation pass is not trusted.
   const auto result = firmware_flash::flashFromSdPath(firmwarePath.c_str(), progressCb, this);
+  if (result == firmware_flash::Result::OTADATA_UNKNOWN) {
+    LOG_ERR("FW", "Boot selection unknown, restarting into stored selection");
+    ESP.restart();
+    return;
+  }
   if (result != firmware_flash::Result::OK) {
     LOG_ERR("FW", "flash failed: %s", firmware_flash::resultName(result));
     // Flash-time validation catches an SD card changed after confirmation.
@@ -176,6 +181,10 @@ void SdFirmwareUpdateActivity::performUpdate() {
     else if (result == firmware_flash::Result::BAD_CHIP || result == firmware_flash::Result::WRONG_BOARD ||
              result == firmware_flash::Result::WRONG_FORK)
       errorMessage = tr(STR_FIRMWARE_WRONG_DEVICE);
+    else if (result == firmware_flash::Result::CONFIRM_REQUIRED)
+      errorMessage = tr(STR_FIRMWARE_CONFIRM_FIRST);
+    else if (result == firmware_flash::Result::GUARD_REFUSED)
+      errorMessage = tr(STR_FIRMWARE_GUARD_REFUSED);
     else
       errorMessage = tr(STR_FIRMWARE_WRITE_FAILED);
     RenderLock lock(*this);

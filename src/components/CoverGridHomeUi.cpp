@@ -30,11 +30,11 @@ constexpr int COVER_ROW_EXTRA_HEIGHT = 8;
 CoverGridHomeUi::CoverGridHomeUi(GfxRenderer& renderer)
     : UiAppHost(renderer), coverCache(renderer), renderer(renderer) {}
 
-void CoverGridHomeUi::begin(const std::vector<RecentBook>& recent, bool opds, bool continuing, bool guest) {
+void CoverGridHomeUi::begin(const std::vector<RecentBook>& recent, bool opds, bool continuing, const char* guest) {
   books = &recent;
   hasOpds = opds;
   hasContinueReading = continuing;
-  hasGuest = guest;
+  setGuest(guest);
   if (!recent.empty()) coverCache.begin();
   resetUi();
   app.on(SELECT, &CoverGridHomeUi::onAction, this);
@@ -42,6 +42,10 @@ void CoverGridHomeUi::begin(const std::vector<RecentBook>& recent, bool opds, bo
   refreshCoverPaths();
   progress = hasContinueReading && !books->empty() ? loadBookProgress(books->front().path) : -1;
   if (progress >= 0) snprintf(progressText, sizeof(progressText), "%d%%", progress);
+}
+
+void CoverGridHomeUi::setGuest(const char* label) {
+  snprintf(guestLabel, sizeof(guestLabel), "%s", label ? label : "");
 }
 
 void CoverGridHomeUi::refreshCoverPaths() {
@@ -117,7 +121,29 @@ void CoverGridHomeUi::draw(UiScreen& screen) {
   // Button boards run tighter above the tabs to make room for the top step.
   const int16_t tabGap = BoardConfig::hasTouch() ? theme.spaceSm : static_cast<int16_t>(4);
   const auto& board = BoardConfig::ACTIVE;
+  const int16_t guestHeight = guestLabel[0] ? 32 + screen.target().lineHeight(theme.smallText.font) + 26 : 0;
+  auto guestRect = screen.takeBottom(guestHeight);
   auto tabRect = screen.takeBottom(UITheme::getInstance().getMetrics().coverGridTabBarHeight, tabGap);
+  if (guestHeight) {
+    auto& guestTab = tabItems.back();
+    guestTab = fui::tabItem(books->size() + 4 + hasOpds, selected == static_cast<int>(books->size() + 4 + hasOpds),
+                            true, guestLabel);
+    auto& guestTabs = tabs;
+    guestTabs.tabs = &guestTab;
+    guestTabs.count = 1;
+    guestTabs.text.font = theme.smallText.font;
+    guestTabs.action = SELECT;
+    guestTabs.inputMask = fui::InputTouch;
+    guestTabs.iconSize = 32;
+    guestTabs.tabStyles.explicitlySet = true;
+    guestTabs.selectedUnderline = 2;
+    guestTabs.iconPainterUserData = this;
+    guestTabs.iconPainter = [](fui::DrawTarget&, fui::Rect rect, const fui::TabItem&, uint8_t, void* user) {
+      static_cast<CoverGridHomeUi*>(user)->renderer.drawIcon(BookIcon, rect.x, rect.y, rect.width);
+      return true;
+    };
+    fui::tabBar(screen.frame(), guestRect, guestTabs);
+  }
   // The board's tab height sits at the bottom of the theme's slot, then its
   // offset lower; the slot itself is unchanged, so the grid keeps its size.
   const auto tabHeight = static_cast<int16_t>(tabRect.height * board.tabBarHeightPct / 100);
@@ -284,12 +310,10 @@ void CoverGridHomeUi::drawGrid(UiScreen& screen) {
 }
 
 void CoverGridHomeUi::drawTabs(UiScreen& screen, fui::Rect rect) {
-  static constexpr const uint8_t* ICONS[] = {FolderIcon,   LibraryIcon,   BlocksIcon,
-                                             TransferIcon, Settings2Icon, TransferIcon};
+  static constexpr const uint8_t* ICONS[] = {FolderIcon, LibraryIcon, BlocksIcon, TransferIcon, Settings2Icon};
   int count = 0;
-  for (int i = 0; i < 6; ++i) {
+  for (int i = 0; i < 5; ++i) {
     if (i == 2 && !hasOpds) continue;
-    if (i == 5 && !hasGuest) continue;
     auto& tab = tabItems[count];
     tab.value = books->size() + count;
     tab.selected = selected == tab.value;

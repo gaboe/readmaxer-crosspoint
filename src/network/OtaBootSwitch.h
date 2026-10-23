@@ -15,28 +15,42 @@
 
 namespace ota_boot {
 
-// Switch the bootloader's selected app partition to `dest` by writing a fresh
-// otadata entry with `state` into the inactive otadata sector. Bypasses
+// Switch the bootloader's selected app partition to `dest`. On X4 Pro, a VALID
+// entry for a bootable non-guest image must survive erase and write. Bypasses
 // esp_ota_set_boot_partition's esp_image_verify call. The bytes in `dest` must
 // already be a valid app image — caller is responsible for that.
 //
-// Returns true on success.
-bool switchTo(const esp_partition_t* dest, uint32_t state = kOtaImgNew);
+// Unknown means flash may have changed but repeated reads could not establish the selection.
+SelectionResult switchTo(const esp_partition_t* dest, uint32_t state = kOtaImgNew);
+
+// Serializes app replacement with otadata changes. On X4 Pro, verifies a VALID
+// bootable non-guest image outside dest before allowing the first erase.
+class AppWriteGuard {
+ public:
+  explicit AppWriteGuard(const esp_partition_t* dest);
+  ~AppWriteGuard();
+  AppWriteGuard(const AppWriteGuard&) = delete;
+  AppWriteGuard& operator=(const AppWriteGuard&) = delete;
+  explicit operator bool() const { return acquired; }
+
+ private:
+  bool acquired = false;
+};
 
 // Boot-loop fallback, X4 Pro only. Call first in setup(), after the power
 // latch. While the running slot is not selected as VALID, it selects the other
 // slot (when a full image check of that slot passes), so a crash before Home
-// boots the other slot. Skipped on a deep-sleep wake. Does not log: Serial is
-// not up yet.
+// boots the other slot. Skipped on a deep-sleep wake. Unsafe selection leaves otadata unchanged.
 void armBootFallback();
 
 // Call before every deliberate sleep or idle that can come before Home, and
-// before overwriting the other slot. While confirmation is pending, it selects
+// before overwriting the other slot. AppWriteGuard separately checks erase safety.
+// While confirmation is pending, it selects
 // the running slot as NEW, so the next boot returns here and the next cold boot
-// arms the fallback again. Returns false when the otadata write failed.
-bool keepRunningSlot();
+// arms the fallback again. Returns the observed selection result.
+SelectionResult keepRunningSlot();
 
-// Selects the running slot as VALID again and then cancels IDF rollback. Call
+// Selects the running slot as VALID through the guarded writer. Call
 // once Home has rendered. Returns false when the otadata write failed; the next
 // call retries.
 bool confirmRunningSlot();

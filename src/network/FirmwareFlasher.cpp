@@ -4,6 +4,7 @@
 #include <BoardConfig.h>
 #include <HalStorage.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #include <mbedtls/sha256.h>
@@ -18,19 +19,16 @@
 #include "GuestSlot.h"
 #include "GuestSlotModel.h"
 #include "OtaBootSwitch.h"
+#include "OtaSlotModel.h"
 
 namespace firmware_flash {
 
 namespace {
-constexpr uint8_t ESP_IMAGE_MAGIC = 0xE9;
 constexpr size_t MIN_FIRMWARE_SIZE = 64 * 1024;
 constexpr size_t SEC = SPI_FLASH_SEC_SIZE;  // 4 KiB
 constexpr size_t BLK = 64 * 1024;           // 64 KiB block-erase granularity
 constexpr size_t CHUNK = 4096;
 constexpr size_t SHA_TRAILER = 32;
-constexpr uint8_t CHECKSUM_SEED = 0xEF;
-constexpr size_t HEADER_SIZE = 24;
-constexpr size_t SEG_HEADER_SIZE = 8;
 }  // namespace
 
 const char* resultName(Result r) {
@@ -73,6 +71,12 @@ const char* resultName(Result r) {
       return "WRITE_FAIL";
     case Result::OTADATA_FAIL:
       return "OTADATA_FAIL";
+    case Result::OTADATA_UNKNOWN:
+      return "OTADATA_UNKNOWN";
+    case Result::CONFIRM_REQUIRED:
+      return "CONFIRM_REQUIRED";
+    case Result::GUARD_REFUSED:
+      return "GUARD_REFUSED";
     case Result::BAD_READBACK:
       return "BAD_READBACK";
   }
@@ -95,34 +99,6 @@ uint16_t runningPartitionChipId() {
   return cached;
 }
 
-namespace {
-// Stream `length` bytes from `file` starting at the current read offset, feeding them through
-// both the XOR-checksum and SHA256 accumulators. Used by validateImageFile so the whole image
-// is verified end-to-end without holding it in RAM (ESP32-C3 only has ~380 KB).
-Result feedHashAndChecksum(HalFile& file, size_t length, uint8_t* xorAccum, mbedtls_sha256_context* sha, uint8_t* buf,
-                           board_tag::Scanner* tagScanner, host_tag::Scanner* hostScanner = nullptr,
-                           guest_slot::Scanner* guestScanner = nullptr) {
-  size_t remaining = length;
-  while (remaining > 0) {
-    const size_t want = std::min<size_t>(CHUNK, remaining);
-    const int got = file.read(buf, want);
-    if (got <= 0 || static_cast<size_t>(got) != want) return Result::READ_FAIL;
-    if (sha) mbedtls_sha256_update(sha, buf, want);
-    if (tagScanner) tagScanner->feed(buf, want);
-    if (hostScanner) hostScanner->feed(buf, want);
-    if (guestScanner) guestScanner->feed(buf, want);
-    if (xorAccum) {
-      uint8_t acc = *xorAccum;
-      for (size_t i = 0; i < want; i++) acc ^= buf[i];
-      *xorAccum = acc;
-    }
-    remaining -= want;
-  }
-  return Result::OK;
-}
-}  // namespace
-
-// ota_boot::slotHoldsAppImage walks the same format in a flash slot; change them together.
 Result validateImageFile(const char* sdPath, size_t partitionSize) {
   HalFile file;
   if (!Storage.openFileForRead("FLASH", sdPath, file) || !file) {
@@ -143,168 +119,79 @@ Result validateImageFile(const char* sdPath, size_t partitionSize) {
     return Result::TOO_LARGE;
   }
 
-  uint8_t header[HEADER_SIZE];
-  if (file.read(header, HEADER_SIZE) != static_cast<int>(HEADER_SIZE)) {
-    LOG_ERR("FLASH", "validate: header read failed");
-    file.close();
-    return Result::READ_FAIL;
-  }
-  if (header[0] != ESP_IMAGE_MAGIC) {
-    LOG_ERR("FLASH", "validate: bad magic 0x%02X", header[0]);
-    file.close();
-    return Result::BAD_MAGIC;
-  }
-  // Reject an image built for a different MCU family before it can brick the
-  // device. chip_id lives at esp_image_header_t offset 12; compare it against
-  // the running slot's own chip_id (self-describing, no chip enumeration).
-  uint16_t imageChip;
-  std::memcpy(&imageChip, header + 12, sizeof(imageChip));
-  const uint16_t deviceChip = runningPartitionChipId();
-  if (deviceChip != 0xFFFF && imageChip != deviceChip) {
-    LOG_ERR("FLASH", "validate: wrong chip: image=0x%04X device=0x%04X", imageChip, deviceChip);
-    file.close();
-    return Result::BAD_CHIP;
-  }
-  const uint8_t segCount = header[1];
-  const bool hashAppended = header[23] != 0;
-
-  auto buf = std::unique_ptr<uint8_t[]>(new (std::nothrow) uint8_t[CHUNK]);
+  auto buf = makeUniqueNoThrow<uint8_t[]>(CHUNK);
   if (!buf) {
-    file.close();
+    LOG_ERR("FLASH", "OOM: image validation buffer (%u bytes)", static_cast<unsigned>(CHUNK));
     return Result::OOM;
   }
-
-  mbedtls_sha256_context shaCtx;
-  mbedtls_sha256_init(&shaCtx);
-  mbedtls_sha256_starts(&shaCtx, /*is224=*/0);
-  mbedtls_sha256_update(&shaCtx, header, HEADER_SIZE);
-
-  uint8_t xorAccum = CHECKSUM_SEED;
-  size_t pos = HEADER_SIZE;
-  board_tag::Scanner tagScanner;
-  host_tag::Scanner hostScanner;
-  guest_slot::Scanner guestScanner;
-  hostScanner.feed(header, HEADER_SIZE);
-  guestScanner.feed(header, HEADER_SIZE);
-
-  for (uint8_t i = 0; i < segCount; i++) {
-    if (pos + SEG_HEADER_SIZE > fileSize) {
-      LOG_ERR("FLASH", "validate: seg %u header overruns EOF at %u", i, static_cast<unsigned>(pos));
-      mbedtls_sha256_free(&shaCtx);
-      file.close();
-      return Result::BAD_SEGMENTS;
-    }
-    uint8_t segHdr[SEG_HEADER_SIZE];
-    if (file.read(segHdr, SEG_HEADER_SIZE) != static_cast<int>(SEG_HEADER_SIZE)) {
-      mbedtls_sha256_free(&shaCtx);
-      file.close();
-      return Result::READ_FAIL;
-    }
-    mbedtls_sha256_update(&shaCtx, segHdr, SEG_HEADER_SIZE);
-    hostScanner.feed(segHdr, SEG_HEADER_SIZE);
-    guestScanner.feed(segHdr, SEG_HEADER_SIZE);
-    pos += SEG_HEADER_SIZE;
-
-    uint32_t dataLen;
-    std::memcpy(&dataLen, segHdr + 4, sizeof(dataLen));
-    if (pos + dataLen > fileSize) {
-      LOG_ERR("FLASH", "validate: seg %u data overruns EOF (%u + %u > %u)", i, static_cast<unsigned>(pos),
-              static_cast<unsigned>(dataLen), static_cast<unsigned>(fileSize));
-      mbedtls_sha256_free(&shaCtx);
-      file.close();
-      return Result::BAD_SEGMENTS;
-    }
-
-    const Result feedRes =
-        feedHashAndChecksum(file, dataLen, &xorAccum, &shaCtx, buf.get(), &tagScanner, &hostScanner, &guestScanner);
-    if (feedRes != Result::OK) {
-      mbedtls_sha256_free(&shaCtx);
-      file.close();
-      return feedRes;
-    }
-    pos += dataLen;
-  }
-
-#if !FREEINK_DEVICE_X4PRO
-  if (tagScanner.mismatch()) {
-    LOG_ERR("FLASH", "validate: wrong board: image=%s device=%.*s", tagScanner.foundName(),
-            static_cast<int>(board_tag::boardNameLen()), board_tag::boardName());
-    mbedtls_sha256_free(&shaCtx);
-    file.close();
-    return Result::WRONG_BOARD;
-  }
-#endif
-
-  // pad_end is the 16-byte aligned offset at which the checksum byte sits at pad_end - 1.
-  const size_t padEnd = (pos + 16) & ~static_cast<size_t>(15);
-  const size_t expectedTotal = padEnd + (hashAppended ? SHA_TRAILER : 0);
-  if (expectedTotal != fileSize) {
-    LOG_ERR("FLASH", "validate: size mismatch body+pad=%u sha=%u expected=%u actual=%u", static_cast<unsigned>(padEnd),
-            static_cast<unsigned>(hashAppended ? SHA_TRAILER : 0), static_cast<unsigned>(expectedTotal),
-            static_cast<unsigned>(fileSize));
-    mbedtls_sha256_free(&shaCtx);
-    file.close();
-    return Result::BAD_SIZE;
-  }
-
-  // Read the padding bytes (which include the stored checksum at the last byte) into the SHA stream.
-  const size_t padLen = padEnd - pos;
-  uint8_t padBuf[16];
-  if (padLen > sizeof(padBuf)) {
-    mbedtls_sha256_free(&shaCtx);
-    file.close();
-    return Result::BAD_SIZE;
-  }
-  if (padLen > 0 && file.read(padBuf, padLen) != static_cast<int>(padLen)) {
-    mbedtls_sha256_free(&shaCtx);
-    file.close();
-    return Result::READ_FAIL;
-  }
-  mbedtls_sha256_update(&shaCtx, padBuf, padLen);
-  hostScanner.feed(padBuf, padLen);
-  guestScanner.feed(padBuf, padLen);
-
-  const uint8_t storedChecksum = padBuf[padLen - 1];
-  if ((xorAccum & 0xFF) != storedChecksum) {
-    LOG_ERR("FLASH", "validate: checksum mismatch computed=0x%02X stored=0x%02X", xorAccum, storedChecksum);
-    mbedtls_sha256_free(&shaCtx);
-    file.close();
-    return Result::BAD_CHECKSUM;
-  }
-
-  if (hashAppended) {
-    uint8_t computed[SHA_TRAILER];
-    mbedtls_sha256_finish(&shaCtx, computed);
-    uint8_t stored[SHA_TRAILER];
-    if (file.read(stored, SHA_TRAILER) != static_cast<int>(SHA_TRAILER)) {
-      mbedtls_sha256_free(&shaCtx);
-      file.close();
-      return Result::READ_FAIL;
-    }
-    hostScanner.feed(stored, SHA_TRAILER);
-    guestScanner.feed(stored, SHA_TRAILER);
-    if (std::memcmp(computed, stored, SHA_TRAILER) != 0) {
-      LOG_ERR("FLASH", "validate: SHA256 mismatch");
-      mbedtls_sha256_free(&shaCtx);
-      file.close();
-      return Result::BAD_SHA;
-    }
-  }
-
-#if FREEINK_DEVICE_X4PRO
-  const auto identity =
-      host_tag::classify(tagScanner.matched(), tagScanner.mismatch(), hostScanner, guestScanner.exactlyOne());
-  if (identity != host_tag::Identity::Host) {
-    mbedtls_sha256_free(&shaCtx);
-    file.close();
-    if (identity == host_tag::Identity::Guest) return Result::GUEST_IMAGE;
-    if (identity == host_tag::Identity::WrongBoard) return Result::WRONG_BOARD;
-    return Result::WRONG_FORK;
-  }
-#endif
-
-  mbedtls_sha256_free(&shaCtx);
+  struct Markers {
+    board_tag::Scanner board;
+    host_tag::Scanner host;
+    guest_slot::Scanner guest;
+  } markers;
+  const auto visit = [](const uint8_t* bytes, uint32_t len, void* ctx) {
+    auto& markers = *static_cast<Markers*>(ctx);
+    markers.board.feed(bytes, len);
+    markers.host.feed(bytes, len);
+    markers.guest.feed(bytes, len);
+  };
+  mbedtls_sha256_context sha;
+  mbedtls_sha256_init(&sha);
+  const ota_boot::ImageHasher hasher{
+      &sha,
+      [](void* ctx, const uint8_t* data, uint32_t len) {
+        return mbedtls_sha256_update(static_cast<mbedtls_sha256_context*>(ctx), data, len) == 0;
+      },
+      [](void* ctx, uint8_t (&digest)[32]) {
+        return mbedtls_sha256_finish(static_cast<mbedtls_sha256_context*>(ctx), digest) == 0;
+      }};
+  const auto read = [](uint32_t offset, void* dst, uint32_t len, void* ctx) {
+    auto& source = *static_cast<HalFile*>(ctx);
+    return source.seek(offset) && source.read(static_cast<uint8_t*>(dst), len) == static_cast<int>(len);
+  };
+  uint32_t imageSize = 0;
+  const auto check =
+      mbedtls_sha256_starts(&sha, 0) == 0
+          ? ota_boot::checkAppImage(read, &file, static_cast<uint32_t>(fileSize), runningPartitionChipId(), hasher,
+                                    buf.get(), CHUNK, visit, &markers, &imageSize)
+          : ota_boot::ImageCheck::BadSha;
+  mbedtls_sha256_free(&sha);
   file.close();
+  if (check != ota_boot::ImageCheck::Ok)
+    LOG_ERR("FLASH", "validate: image check failed (%u)", static_cast<unsigned>(check));
+  switch (check) {
+    case ota_boot::ImageCheck::ReadError:
+      return Result::READ_FAIL;
+    case ota_boot::ImageCheck::BadMagic:
+      return Result::BAD_MAGIC;
+    case ota_boot::ImageCheck::BadChip:
+      return Result::BAD_CHIP;
+    case ota_boot::ImageCheck::BadSegments:
+      return Result::BAD_SEGMENTS;
+    case ota_boot::ImageCheck::BadChecksum:
+      return Result::BAD_CHECKSUM;
+    case ota_boot::ImageCheck::BadSha:
+      return Result::BAD_SHA;
+    case ota_boot::ImageCheck::Ok:
+      break;
+  }
+  if (imageSize != fileSize) return Result::BAD_SIZE;
+#if FREEINK_DEVICE_X4PRO
+  const auto identity = host_tag::classify(markers.board.matched(), markers.board.mismatch(), markers.host.count(),
+                                           markers.guest.count());
+  switch (identity) {
+    case host_tag::Identity::Host:
+      return Result::OK;
+    case host_tag::Identity::Guest:
+      return Result::GUEST_IMAGE;
+    case host_tag::Identity::WrongBoard:
+      return Result::WRONG_BOARD;
+    case host_tag::Identity::WrongFork:
+      return Result::WRONG_FORK;
+  }
+#else
+  if (markers.board.mismatch()) return Result::WRONG_BOARD;
+#endif
   return Result::OK;
 }
 
@@ -316,7 +203,11 @@ bool hashFile(const char* sdPath, size_t size, uint8_t* buf, uint8_t (&out)[SHA_
   mbedtls_sha256_context sha;
   mbedtls_sha256_init(&sha);
   mbedtls_sha256_starts(&sha, /*is224=*/0);
-  const bool ok = feedHashAndChecksum(file, size, nullptr, &sha, buf, nullptr) == Result::OK;
+  bool ok = true;
+  for (size_t pos = 0; ok && pos < size; pos += CHUNK) {
+    const size_t want = std::min<size_t>(CHUNK, size - pos);
+    ok = file.read(buf, want) == static_cast<int>(want) && mbedtls_sha256_update(&sha, buf, want) == 0;
+  }
   mbedtls_sha256_finish(&sha, out);
   mbedtls_sha256_free(&sha);
   file.close();
@@ -358,7 +249,14 @@ Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx) {
 
   // While the boot fallback is armed, otadata selects `dest`. Select the
   // running slot first so an interrupted write never leaves a partial image selected.
-  if (!ota_boot::keepRunningSlot()) return Result::OTADATA_FAIL;
+  switch (ota_boot::keepRunningSlot()) {
+    case ota_boot::SelectionResult::Selected:
+      break;
+    case ota_boot::SelectionResult::Failed:
+      return Result::OTADATA_FAIL;
+    case ota_boot::SelectionResult::Unknown:
+      return Result::OTADATA_UNKNOWN;
+  }
   guest_slot::invalidateCache();
 
   HalFile file;
@@ -378,61 +276,70 @@ Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx) {
     return Result::OOM;
   }
 
-  // Interleave erase + write so the progress bar advances 0→100% smoothly
-  // rather than stalling for several seconds during a single up-front erase.
-  size_t streamPos = 0;
-  size_t erasedUpto = 0;
-  while (streamPos < firmwareSize) {
-    if (streamPos >= erasedUpto) {
-      size_t eraseLen = std::min<size_t>(BLK, dest->size - streamPos);
-      eraseLen = (eraseLen + SEC - 1) & ~(SEC - 1);
-      eraseLen = std::min<size_t>(eraseLen, dest->size - streamPos);
-      if (esp_partition_erase_range(dest, streamPos, eraseLen) != ESP_OK) {
-        LOG_ERR("FLASH", "erase @%u (len=%u) failed", static_cast<unsigned>(streamPos),
-                static_cast<unsigned>(eraseLen));
-        file.close();
-        return Result::ERASE_FAIL;
-      }
-      erasedUpto = streamPos + eraseLen;
-    }
+  {
+    ota_boot::AppWriteGuard appWrite(dest);
+    if (!appWrite) return ota_boot::confirmationPending() ? Result::CONFIRM_REQUIRED : Result::GUARD_REFUSED;
 
-    const size_t want = std::min<size_t>(CHUNK, firmwareSize - streamPos);
-    const int read = file.read(buffer.get(), want);
-    if (read <= 0 || static_cast<size_t>(read) != want) {
-      LOG_ERR("FLASH", "read @%u: got=%d want=%u", static_cast<unsigned>(streamPos), read, static_cast<unsigned>(want));
-      file.close();
+    // Interleave erase + write so the progress bar advances 0→100% smoothly
+    // rather than stalling for several seconds during a single up-front erase.
+    size_t streamPos = 0;
+    size_t erasedUpto = 0;
+    while (streamPos < firmwareSize) {
+      if (streamPos >= erasedUpto) {
+        size_t eraseLen = std::min<size_t>(BLK, dest->size - streamPos);
+        eraseLen = (eraseLen + SEC - 1) & ~(SEC - 1);
+        eraseLen = std::min<size_t>(eraseLen, dest->size - streamPos);
+        if (esp_partition_erase_range(dest, streamPos, eraseLen) != ESP_OK) {
+          LOG_ERR("FLASH", "erase @%u (len=%u) failed", static_cast<unsigned>(streamPos),
+                  static_cast<unsigned>(eraseLen));
+          file.close();
+          return Result::ERASE_FAIL;
+        }
+        erasedUpto = streamPos + eraseLen;
+      }
+
+      const size_t want = std::min<size_t>(CHUNK, firmwareSize - streamPos);
+      const int read = file.read(buffer.get(), want);
+      if (read <= 0 || static_cast<size_t>(read) != want) {
+        LOG_ERR("FLASH", "read @%u: got=%d want=%u", static_cast<unsigned>(streamPos), read,
+                static_cast<unsigned>(want));
+        file.close();
+        return Result::READ_FAIL;
+      }
+      if (esp_partition_write(dest, streamPos, buffer.get(), want) != ESP_OK) {
+        LOG_ERR("FLASH", "write @%u failed", static_cast<unsigned>(streamPos));
+        file.close();
+        return Result::WRITE_FAIL;
+      }
+      streamPos += want;
+      if (onProgress) onProgress(streamPos, firmwareSize, ctx);
+      delay(1);
+    }
+    file.close();
+
+    // A fresh file read, not the bytes just written: an SD read error inside the
+    // write loop would otherwise be hashed and written alike.
+    uint8_t fileSha[SHA_TRAILER];
+    uint8_t slotSha[SHA_TRAILER];
+    if (!hashFile(sdPath, firmwareSize, buffer.get(), fileSha) ||
+        !hashPartition(dest, firmwareSize, buffer.get(), slotSha)) {
+      LOG_ERR("FLASH", "readback read failed");
       return Result::READ_FAIL;
     }
-    if (esp_partition_write(dest, streamPos, buffer.get(), want) != ESP_OK) {
-      LOG_ERR("FLASH", "write @%u failed", static_cast<unsigned>(streamPos));
-      file.close();
-      return Result::WRITE_FAIL;
+    if (std::memcmp(fileSha, slotSha, SHA_TRAILER) != 0) {
+      LOG_ERR("FLASH", "readback SHA-256 mismatch; otadata unchanged");
+      return Result::BAD_READBACK;
     }
-    streamPos += want;
-    if (onProgress) onProgress(streamPos, firmwareSize, ctx);
-    delay(1);
   }
-  file.close();
-
-  // A fresh file read, not the bytes just written: an SD read error inside the
-  // write loop would otherwise be hashed and written alike.
-  uint8_t fileSha[SHA_TRAILER];
-  uint8_t slotSha[SHA_TRAILER];
-  if (!hashFile(sdPath, firmwareSize, buffer.get(), fileSha) ||
-      !hashPartition(dest, firmwareSize, buffer.get(), slotSha)) {
-    LOG_ERR("FLASH", "readback read failed");
-    return Result::READ_FAIL;
+  switch (ota_boot::switchTo(dest)) {
+    case ota_boot::SelectionResult::Selected:
+      return Result::OK;
+    case ota_boot::SelectionResult::Failed:
+      return Result::OTADATA_FAIL;
+    case ota_boot::SelectionResult::Unknown:
+      return Result::OTADATA_UNKNOWN;
   }
-  if (std::memcmp(fileSha, slotSha, SHA_TRAILER) != 0) {
-    LOG_ERR("FLASH", "readback SHA-256 mismatch; otadata unchanged");
-    return Result::BAD_READBACK;
-  }
-
-  if (!ota_boot::switchTo(dest)) {
-    LOG_ERR("FLASH", "otadata switch failed");
-    return Result::OTADATA_FAIL;
-  }
-  return Result::OK;
+  return Result::OTADATA_FAIL;
 }
 
 }  // namespace firmware_flash

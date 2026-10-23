@@ -17,12 +17,13 @@ struct __attribute__((packed)) SelectEntry {
 };
 static_assert(sizeof(SelectEntry) == 32, "SelectEntry must be 32 bytes");
 
-constexpr uint32_t kOtaImgNew = 0;      // ESP_OTA_IMG_NEW
-constexpr uint32_t kOtaImgValid = 2;    // ESP_OTA_IMG_VALID
-constexpr uint32_t kOtaImgInvalid = 3;  // ESP_OTA_IMG_INVALID
-constexpr uint32_t kOtaImgAborted = 4;  // ESP_OTA_IMG_ABORTED
-constexpr uint32_t kSlotCount = 2;      // partitions.csv has ota_0 and ota_1
-constexpr uint32_t kEntrySectors = 2;   // otadata holds one entry per 4 KiB sector
+constexpr uint32_t kOtaImgNew = 0;            // ESP_OTA_IMG_NEW
+constexpr uint32_t kOtaImgPendingVerify = 1;  // ESP_OTA_IMG_PENDING_VERIFY
+constexpr uint32_t kOtaImgValid = 2;          // ESP_OTA_IMG_VALID
+constexpr uint32_t kOtaImgInvalid = 3;        // ESP_OTA_IMG_INVALID
+constexpr uint32_t kOtaImgAborted = 4;        // ESP_OTA_IMG_ABORTED
+constexpr uint32_t kSlotCount = 2;            // partitions.csv has ota_0 and ota_1
+constexpr uint32_t kEntrySectors = 2;         // otadata holds one entry per 4 KiB sector
 
 // CRC32-LE over the 4-byte ota_seq with init UINT32_MAX, as esp_rom_crc32_le
 // and IDF otatool.py compute it.
@@ -40,10 +41,22 @@ struct EntryWrite {
   SelectEntry entry;
 };
 
-// Plan a selection without erasing the running slot's newest VALID entry.
-// Refuse when no sequence below the bootloader's blank value can win.
-bool planSelect(const SelectEntry (&entries)[kEntrySectors], uint32_t runningSlot, uint32_t slot, uint32_t state,
-                EntryWrite& write);
+// Current checksum/SHA-verified images without a guest marker. Host markers are irrelevant.
+struct BootableSlots {
+  bool slots[kSlotCount]{};
+};
+
+enum class SelectionResult { Selected, Failed, Unknown };
+enum class WritePolicy { PreserveBootable, Legacy };
+
+bool appEraseIsSafe(const SelectEntry (&entries)[kEntrySectors], const BootableSlots& images, uint32_t destination);
+
+// Check the erased and completed states before any sector is touched.
+bool writeIsSafe(const SelectEntry (&entries)[kEntrySectors], const BootableSlots& images, const EntryWrite& write,
+                 uint32_t intendedSlot, uint32_t intendedState, WritePolicy policy = WritePolicy::PreserveBootable);
+
+bool planSelect(const SelectEntry (&entries)[kEntrySectors], const BootableSlots& images, uint32_t slot, uint32_t state,
+                EntryWrite& write, WritePolicy policy = WritePolicy::PreserveBootable);
 
 enum class SlotCheck {
   Confirmed,    // the active entry selects the running slot as VALID
@@ -63,16 +76,10 @@ struct BootPlan {
 // never marks itself valid, and VALID boots under either rollback setting.
 BootPlan planBoot(const SelectEntry (&entries)[kEntrySectors], uint32_t runningSlot, bool deepSleepWake);
 
-// The write that makes the next boot return to the running slot before a
-// deliberate sleep or idle while confirmation is pending. NoWrite means the
-// running slot is already selected. Unsafe means no usable sequence remains. The running
-// slot is selected as NEW, not VALID: the next cold boot
-// arms the fallback again, and a bootloader with rollback on turns NEW into
-// PENDING_VERIFY and aborts it after a crash. When the active entry already
-// selects the running slot without a VALID entry, its sector is rewritten in
-// place, so the other sector keeps the other slot's entry as the fallback.
+// Preserve a VALID entry for a bootable non-guest image while arranging a deliberate wake into the running slot.
 enum class KeepPlan { NoWrite, Write, Unsafe };
-KeepPlan planKeepRunningSlot(const SelectEntry (&entries)[kEntrySectors], uint32_t runningSlot, EntryWrite& write);
+KeepPlan planKeepRunningSlot(const SelectEntry (&entries)[kEntrySectors], const BootableSlots& images,
+                             uint32_t runningSlot, EntryWrite& write);
 
 // Reads `len` bytes at `offset` of a slot. Returns false on a read error.
 using SlotReader = bool (*)(uint32_t offset, void* dst, uint32_t len, void* ctx);
@@ -87,16 +94,14 @@ struct ImageHasher {
 
 using SegmentVisitor = void (*)(const uint8_t* data, uint32_t len, void* ctx);
 
-// Full check that a slot holds an ESP32-S3 app image for `chipId`, as the
-// bootloader checks it before it boots the image: magic, chip id, segment
-// count, a first segment in flash-mapped DROM or IROM, 4-byte aligned segment
-// lengths inside `slotSize`, the XOR checksum at the end of the 16-byte
-// padding, and the appended SHA-256 over all bytes before it, which must be
-// present. `buf` holds the segment reads. scripts/check_slot_image.py applies
-// the same rules to a release file, and firmware_flash::validateImageFile walks
-// the same format for an SD file without the alignment and required-SHA rules;
-// change them together.
-bool slotHoldsAppImage(SlotReader read, void* ctx, uint32_t slotSize, uint16_t chipId, const ImageHasher& hasher,
-                       uint8_t* buf, uint32_t bufLen, SegmentVisitor visitor = nullptr, void* visitorCtx = nullptr);
+enum class ImageCheck { Ok, ReadError, BadMagic, BadChip, BadSegments, BadChecksum, BadSha };
+
+// Streaming image check shared by SD files and flash slots. S3 acceptance is
+// bounded to chip revisions 0..99, eFuse block revisions 0..199, 64 KiB MMU
+// pages and the IDF 5.4.3 application RAM region below the bootloader.
+// imageSize excludes unused bytes at the end of a flash slot.
+ImageCheck checkAppImage(SlotReader read, void* ctx, uint32_t slotSize, uint16_t chipId, const ImageHasher& hasher,
+                         uint8_t* buf, uint32_t bufLen, SegmentVisitor visitor = nullptr, void* visitorCtx = nullptr,
+                         uint32_t* imageSize = nullptr);
 
 }  // namespace ota_boot

@@ -7,6 +7,7 @@
 #include <mbedtls/sha256.h>
 
 #include "FirmwareFlasher.h"
+#include "FirmwareHostTag.h"
 #include "OtaBootSwitch.h"
 
 namespace guest_slot {
@@ -35,9 +36,14 @@ bool inspectPartition(const esp_partition_t* other, Inspection& result) {
     return esp_partition_read(static_cast<const esp_partition_t*>(ctx), offset, dst, len) == ESP_OK;
   };
   auto candidate = inspectHeader(read, const_cast<esp_partition_t*>(other), other->size);
-  Scanner scanner;
+  struct Markers {
+    Scanner guest;
+    host_tag::Scanner host;
+  } markers;
   const auto visit = [](const uint8_t* bytes, uint32_t len, void* ctx) {
-    static_cast<Scanner*>(ctx)->feed(bytes, len);
+    auto& markers = *static_cast<Markers*>(ctx);
+    markers.guest.feed(bytes, len);
+    markers.host.feed(bytes, len);
   };
   mbedtls_sha256_context sha;
   mbedtls_sha256_init(&sha);
@@ -49,13 +55,14 @@ bool inspectPartition(const esp_partition_t* other, Inspection& result) {
       [](void* ctx, uint8_t (&digest)[32]) {
         return mbedtls_sha256_finish(static_cast<mbedtls_sha256_context*>(ctx), digest) == 0;
       }};
-  const bool valid =
-      mbedtls_sha256_starts(&sha, 0) == 0 &&
-      ota_boot::slotHoldsAppImage(read, const_cast<esp_partition_t*>(other), other->size,
-                                  firmware_flash::runningPartitionChipId(), hasher, buf, 4096, visit, &scanner);
+  const bool valid = mbedtls_sha256_starts(&sha, 0) == 0 &&
+                     ota_boot::checkAppImage(read, const_cast<esp_partition_t*>(other), other->size,
+                                             firmware_flash::runningPartitionChipId(), hasher, buf, 4096, visit,
+                                             &markers) == ota_boot::ImageCheck::Ok;
   mbedtls_sha256_free(&sha);
   heap_caps_free(buf);
-  if (valid && candidate.installed && scanner.exactlyOne()) {
+  result.bootableNonGuest = valid && markers.guest.count() == 0;
+  if (valid && candidate.installed && markers.guest.exactlyOne() && markers.host.count() == 0) {
     result.image = candidate;
     result.partition = other;
   }
@@ -86,12 +93,19 @@ bool switchAllowed() {
                    ota_boot::confirmationPending());
 }
 
-bool switchGuest() {
-  if (!switchAllowed() || !canSwitch(ota_boot::runningSlotCheck(), ota_boot::confirmationPending())) return false;
+ota_boot::SelectionResult switchGuest() {
+  if (!switchAllowed() || !canSwitch(ota_boot::runningSlotCheck(), ota_boot::confirmationPending()))
+    return ota_boot::SelectionResult::Failed;
   const Inspection fresh = inspectFresh();
-  return fresh.image.installed && fresh.partition && switchAllowed() &&
-         canSwitch(ota_boot::runningSlotCheck(), ota_boot::confirmationPending()) &&
-         ota_boot::switchTo(fresh.partition, ota_boot::kOtaImgNew);
+  if (!fresh.image.installed || !fresh.partition || !switchAllowed() ||
+      !canSwitch(ota_boot::runningSlotCheck(), ota_boot::confirmationPending()))
+    return ota_boot::SelectionResult::Failed;
+  return ota_boot::switchTo(fresh.partition, ota_boot::kOtaImgNew);
+}
+
+bool bootableNonGuest(const esp_partition_t* partition) {
+  Inspection result;
+  return inspectPartition(partition, result) && result.bootableNonGuest;
 }
 
 bool checkAndCache(const esp_partition_t* other) {

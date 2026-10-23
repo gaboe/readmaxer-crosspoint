@@ -14,6 +14,7 @@ struct GuestImage {
 class Scanner {
  public:
   void feed(const uint8_t* data, uint32_t len);
+  uint8_t count() const { return occurrences; }
   bool exactlyOne() const { return occurrences == 1; }
 
  private:

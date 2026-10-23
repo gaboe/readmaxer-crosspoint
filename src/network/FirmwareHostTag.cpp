@@ -23,9 +23,9 @@ void Scanner::feed(const uint8_t* data, size_t len) {
   }
 }
 
-Identity classify(bool boardMatched, bool boardMismatch, const Scanner& host, bool guestMarker) {
-  if (boardMatched && !boardMismatch && host.exactlyOne() && !guestMarker) return Identity::Host;
-  if (!host.exactlyOne() && guestMarker) return Identity::Guest;
+Identity classify(bool boardMatched, bool boardMismatch, uint8_t hostCount, uint8_t guestCount) {
+  if (boardMatched && !boardMismatch && hostCount == 1 && guestCount == 0) return Identity::Host;
+  if (hostCount == 0 && guestCount > 0) return Identity::Guest;
   if (!boardMatched || boardMismatch) return Identity::WrongBoard;
   return Identity::WrongFork;
 }

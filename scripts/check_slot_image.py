@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Refuse any file that is not a single app image safe to write into an OTA slot.
 
-A Python port of firmware_flash::validateImageFile (src/network/FirmwareFlasher.cpp),
-plus the segment-count, first-segment, segment-alignment, and required SHA-256
-rules of ota_boot::slotHoldsAppImage, and two more rules for this fork: a merged image (bootloader at 0x0 or partition
-table at 0x8000, such as firmware.factory.bin) is refused, and so is an image
-larger than 0x5C0000, which keeps 0x80000 of headroom in a 0x640000 slot.
+The format rules mirror ota_boot::checkAppImage. S3 images must support chip
+revisions 0..99 and eFuse block revisions 0..199, use 64 KiB MMU pages, and
+stay below IDF 5.4.3 bootloader RAM. Release checks also reject merged images
+and require 0x80000 headroom in a 0x640000 slot.
 
 Usage: check_slot_image.py [--chip ID] [--board NAME] IMAGE
 Prints "OK slot image ..." and exits 0, or prints "REFUSED: <reason>" and exits 1.
@@ -30,6 +29,7 @@ APP_DESC_OFFSET = HEADER_SIZE + SEGMENT_HEADER_SIZE
 BOARD_TAG_MAGIC = b"CROSSPOINT-BOARD-V1:"
 CHIP_ESP32S3 = 9
 MAX_SEGMENTS = 16  # ESP_IMAGE_MAX_SEGMENTS
+MMU_PAGE_SIZE = 0x10000
 
 
 class Refused(Exception):
@@ -46,8 +46,25 @@ def _has_partition_table(data):
 
 
 def _flash_mapped(addr):
-    """ESP32-S3 flash-mapped DROM and IROM, as ota_boot::slotHoldsAppImage checks the first segment."""
+    """ESP32-S3 flash-mapped DROM and IROM, as ota_boot::checkAppImage."""
     return 0x3C000000 <= addr < 0x3E000000 or 0x42000000 <= addr < 0x44000000
+
+
+def _supports_revision_bound(maximum, bound):
+    return maximum == 0 or maximum >= bound
+
+
+def _s3_load_range(address, length):
+    if length == 0 or address < 0x10000000:
+        return True
+    if _flash_mapped(address):
+        ranges = ((0x3C000000, 0x3E000000), (0x42000000, 0x44000000))
+    else:
+        if address % 4:
+            return False
+        ranges = ((0x3FC88000, 0x3FCDB700), (0x40370000, 0x403CB700),
+                  (0x600FE000, 0x60100000), (0x50000000, 0x50002000))
+    return any(low <= address < high and length <= high - address for low, high in ranges)
 
 
 def _scan_board_tags(segment_data):
@@ -82,6 +99,10 @@ def check(data, chip=CHIP_ESP32S3, board=None):
     hash_appended = header[23] != 0
     if image_chip != chip:
         raise Refused(f"wrong chip: image={image_chip} expected={chip}")
+    if chip == CHIP_ESP32S3:
+        minimum, maximum = struct.unpack_from("<HH", header, 15)
+        if minimum != 0 or not _supports_revision_bound(maximum, 99):
+            raise Refused("chip revision range does not cover 0..99")
     if not 0 < segment_count <= MAX_SEGMENTS:
         raise Refused(f"bad segment count {segment_count}")
     if not hash_appended:
@@ -92,6 +113,7 @@ def check(data, chip=CHIP_ESP32S3, board=None):
     checksum = CHECKSUM_SEED
     pos = HEADER_SIZE
     segment_bytes = []
+    has_drom = has_irom = False
     for i in range(segment_count):
         if pos + SEGMENT_HEADER_SIZE > size:
             raise Refused(f"segment {i} header overruns EOF at {pos}")
@@ -101,13 +123,36 @@ def check(data, chip=CHIP_ESP32S3, board=None):
         if data_len % 4:
             raise Refused(f"segment {i} length {data_len} is not 4-byte aligned")
         pos += SEGMENT_HEADER_SIZE
+        if _flash_mapped(load_addr) and load_addr % MMU_PAGE_SIZE != pos % MMU_PAGE_SIZE:
+            raise Refused(f"segment {i} mapped address does not match flash MMU page offset")
+        if data_len >= 0x1000000:
+            raise Refused(f"segment {i} length exceeds bootloader limit")
         if pos + data_len > size:
             raise Refused(f"segment {i} data overruns EOF ({pos} + {data_len} > {size})")
+        if chip == CHIP_ESP32S3:
+            if not _s3_load_range(load_addr, data_len):
+                raise Refused(f"segment {i} has invalid S3 load address range")
+            if _flash_mapped(load_addr):
+                if data_len == 0:
+                    raise Refused("empty mapped segment")
+                has_drom |= load_addr < 0x3E000000
+                has_irom |= load_addr >= 0x42000000
+            if i == 0:
+                if data_len < 256:
+                    raise Refused("first segment is shorter than the app descriptor")
+                minimum, maximum, page = struct.unpack_from("<HHB", data, pos + 176)
+                if minimum not in (0, 65535) or not _supports_revision_bound(maximum, 199):
+                    raise Refused("eFuse block revision range does not cover 0..199")
+                if page not in (0, 16):
+                    raise Refused("unsupported MMU page size")
         segment = data[pos : pos + data_len]
         segment_bytes.append(segment)
         for b in segment:
             checksum ^= b
         pos += data_len
+
+    if chip == CHIP_ESP32S3 and not (has_drom and has_irom):
+        raise Refused("missing DROM or IROM mapping")
 
     tags = _scan_board_tags(b"".join(segment_bytes))
     if board is not None and any(tag != board for tag in tags):

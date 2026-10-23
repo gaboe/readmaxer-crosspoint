@@ -252,7 +252,8 @@ void HomeActivity::onEnter() {
   if (coverGridUi) {
     fillCoverGridFromLibrary();
     resolveGridCoverPaths();
-    coverGridUi->begin(recentBooks, hasLibrarySlot(), hasContinueReading, guest.image.installed);
+    coverGridUi->begin(recentBooks, hasLibrarySlot(), hasContinueReading,
+                       guest.image.installed ? guestLabel.c_str() : nullptr);
   }
 
   const auto base = static_cast<int>(recentBooks.size());
@@ -336,10 +337,15 @@ void HomeActivity::loop() {
         break;
       default:
         if (guest.image.installed && menuIndex == 4 + static_cast<int>(hasLibrarySlot())) {
-          if (guest_slot::switchGuest())
-            silentRestart();
-          else
-            GUI.drawPopup(renderer, tr(STR_UPDATE_FAILED));
+          switch (guest_slot::switchGuest()) {
+            case ota_boot::SelectionResult::Selected:
+            case ota_boot::SelectionResult::Unknown:
+              silentRestart();
+              break;
+            case ota_boot::SelectionResult::Failed:
+              GUI.drawPopup(renderer, tr(STR_UPDATE_FAILED));
+              break;
+          }
         }
         break;
     }
@@ -498,7 +504,7 @@ void HomeActivity::render(RenderLock&&) {
     if (ota_boot::confirmationPending() && ota_boot::confirmRunningSlot()) {
       guest = guest_slot::inspect();
       if (guest.image.installed) guestLabel = std::string(tr(STR_READMAXER)) + " " + guest.image.version;
-      coverGridUi->setGuest(guest.image.installed);
+      coverGridUi->setGuest(guest.image.installed ? guestLabel.c_str() : nullptr);
       requestUpdate();
     }
     // Slot heights are recorded during the draw above; a change (first layout

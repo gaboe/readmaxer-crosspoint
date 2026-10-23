@@ -8,13 +8,15 @@ namespace guest_slot {
 
 struct Inspection {
   GuestImage image;
+  bool bootableNonGuest = false;
   const esp_partition_t* partition = nullptr;
 };
 
 Inspection inspect();
 Inspection inspectFresh();
 bool switchAllowed();
-bool switchGuest();
+ota_boot::SelectionResult switchGuest();
+bool bootableNonGuest(const esp_partition_t* partition);
 bool checkAndCache(const esp_partition_t* other);
 void invalidateCache();
 

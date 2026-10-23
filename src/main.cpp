@@ -457,18 +457,28 @@ static bool holdSleepWhileUsbPowered() {
 }
 #endif
 
-// Every deliberate deep sleep goes through here, so a sleep before Home never
-// leaves the boot fallback armed.
-static void sleepNow(const bool wakeOnHeldButton = false) {
+static void sleepPrepared(const bool wakeOnHeldButton) {
   Storage.prepareForDeepSleep();
-  ota_boot::keepRunningSlot();
   LOG_DBG("MAIN", "Entering deep sleep");
   powerManager.startDeepSleep(gpio, wakeOnHeldButton);
+}
+
+// Early-boot callers have not checked selection or started teardown.
+static void sleepNow(const bool wakeOnHeldButton = false) {
+  if (ota_boot::keepRunningSlot() != ota_boot::SelectionResult::Selected) {
+    LOG_ERR("MAIN", "Sleep refused: running slot cannot be kept");
+    return;
+  }
+  sleepPrepared(wakeOnHeldButton);
 }
 
 // Enter deep sleep mode
 void enterDeepSleep(bool fromTimeout = false) {
   HalPowerManager::Lock powerLock;  // Ensure we are at normal CPU frequency for sleep preparation
+  if (ota_boot::keepRunningSlot() != ota_boot::SelectionResult::Selected) {
+    LOG_ERR("MAIN", "Sleep refused before shutdown: running slot cannot be kept");
+    return;
+  }
   APP_STATE.lastSleepFromReader = activityManager.isReaderActivity();
 
   // Sleep may end in a power-off (battery death, latch); persist the clock
@@ -518,7 +528,7 @@ void enterDeepSleep(bool fromTimeout = false) {
 
   halTiltSensor.deepSleep();
   display.deepSleep();
-  sleepNow(wakeOnHeldButton);
+  sleepPrepared(wakeOnHeldButton);
 }
 
 void setupDisplayAndFonts(bool seamless = false) {
@@ -637,7 +647,8 @@ void setup() {
   // We need 6 open files concurrently when parsing a new chapter
   if (!Storage.begin()) {
     LOG_ERR("MAIN", "SD card initialization failed");
-    ota_boot::keepRunningSlot();
+    if (ota_boot::keepRunningSlot() != ota_boot::SelectionResult::Selected)
+      LOG_ERR("MAIN", "SD error: boot selection remains unsafe; staying awake");
     setupDisplayAndFonts(isSilentReboot);
     activityManager.goToFullScreenMessage("SD card error", EpdFontFamily::BOLD);
     return;

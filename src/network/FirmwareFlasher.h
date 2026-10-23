@@ -33,6 +33,9 @@ enum class Result {
   ERASE_FAIL,
   WRITE_FAIL,
   OTADATA_FAIL,
+  OTADATA_UNKNOWN,  // caller must restart into the stored selection
+  CONFIRM_REQUIRED,
+  GUARD_REFUSED,
   BAD_READBACK,  // written slot's SHA-256 differs from the source file's
 };
 
@@ -43,7 +46,7 @@ using ProgressCb = void (*)(size_t written, size_t total, void* ctx);
 // next OTA app partition with interleaved 64 KiB erase + sector writes, then
 // reads the slot back and compares its SHA-256 with a fresh read of the file.
 // Only on a match does it switch otadata via ota_boot::switchTo; otherwise
-// otadata is left unchanged. Caller is responsible for ESP.restart() afterwards.
+// selection is not attempted. Caller must restart after OK or OTADATA_UNKNOWN.
 Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx);
 
 // Full-image integrity check that mirrors the bootloader's verification:
