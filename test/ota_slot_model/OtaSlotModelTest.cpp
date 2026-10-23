@@ -110,6 +110,24 @@ TEST(OtaSlotModel, PlanSelectWritesTheInactiveSectorWithTheNextSeqForTheSlot) {
   EXPECT_EQ(fromBlank.entry.ota_seq, 2u);
 }
 
+TEST(OtaSlotModel, GuestSwitchIsNewAndPreservesForkSectorOnTornWrite) {
+  for (uint32_t forkSlot = 0; forkSlot < kSlotCount; ++forkSlot) {
+    for (uint32_t forkSector = 0; forkSector < kEntrySectors; ++forkSector) {
+      Otadata data = {blankEntry(), blankEntry()};
+      data[forkSector] = entry(forkSlot + 1, kOtaImgValid);
+      const auto forkEntry = data[forkSector];
+      const EntryWrite guestWrite = planSelect(data, 1 - forkSlot, kOtaImgNew);
+      EXPECT_EQ(guestWrite.sector, 1 - forkSector);
+      EXPECT_EQ(guestWrite.entry.ota_state, kOtaImgNew);
+      EXPECT_EQ(entrySlot(guestWrite.entry), 1 - forkSlot);
+      EXPECT_EQ(std::memcmp(&data[forkSector], &forkEntry, sizeof(forkEntry)), 0);
+      apply(data, guestWrite);
+      EXPECT_EQ(bootloaderSelect(data, true), 1 - forkSlot);
+      EXPECT_EQ(bootloaderSelect(data, true), forkSlot);
+    }
+  }
+}
+
 TEST(OtaSlotModel, CheckRunningSlotClassifiesEveryOtadataState) {
   Otadata blank = {blankEntry(), blankEntry()};
   EXPECT_EQ(checkRunningSlot(blank, 0), SlotCheck::Unconfirmed);
@@ -432,6 +450,30 @@ TEST(OtaSlotModel, SlotImageCheckAcceptsAWellFormedImage) {
   EXPECT_TRUE(holds(image, 0x10000));  // erased flash after the image
   EXPECT_TRUE(holds(appImage(kChipS3, {64}, true), 0x1000));
   EXPECT_TRUE(holds(appImage(kChipS3, {64}, true, 0x42000020), 0x1000));
+}
+
+TEST(OtaSlotModel, AuthenticatedGuestImageNeedsProjectAndOneMarker) {
+  auto image = appImage(kChipS3, {256}, true);
+  const uint32_t magic = 0xABCD5432;
+  std::memcpy(image.data() + 32, &magic, sizeof(magic));
+  std::memcpy(image.data() + 48, "1.2.3", 6);
+  std::memcpy(image.data() + 80, "readmaxer-xteink-x4pro", sizeof("readmaxer-xteink-x4pro"));
+  std::memcpy(image.data() + 200, "READMAXER-GUEST-V1;", sizeof("READMAXER-GUEST-V1;") - 1);
+  uint8_t checksum = 0xEF;
+  for (size_t i = 32; i < 288; ++i) checksum ^= image[i];
+  image[303] = checksum;
+  Sha256 sha;
+  sha.update(image.data(), 304);
+  uint8_t digest[32];
+  sha.finish(digest);
+  std::memcpy(image.data() + 304, digest, sizeof(digest));
+  ASSERT_TRUE(holds(image, 4096));
+  uint8_t buf[17];
+  const auto guest = inspectGuestImage(readVector, &image, image.size(), buf, sizeof(buf));
+  EXPECT_TRUE(guest.installed);
+  EXPECT_STREQ(guest.version, "1.2.3");
+  image[200] ^= 1;
+  EXPECT_FALSE(holds(image, 4096));
 }
 
 TEST(OtaSlotModel, SlotImageCheckRejectsCorruptChecksumHashAndFirstSegment) {

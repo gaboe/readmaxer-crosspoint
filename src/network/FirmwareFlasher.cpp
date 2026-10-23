@@ -1,6 +1,7 @@
 #include "FirmwareFlasher.h"
 
 #include <Arduino.h>
+#include <BoardConfig.h>
 #include <HalStorage.h>
 #include <Logging.h>
 #include <esp_ota_ops.h>
@@ -210,7 +211,11 @@ Result validateImageFile(const char* sdPath, size_t partitionSize) {
     pos += dataLen;
   }
 
-  if (tagScanner.mismatch()) {
+  if (tagScanner.mismatch()
+#if FREEINK_DEVICE_X4PRO
+      || !tagScanner.matched()
+#endif
+  ) {
     LOG_ERR("FLASH", "validate: wrong board: image=%s device=%.*s", tagScanner.foundName(),
             static_cast<int>(board_tag::boardNameLen()), board_tag::boardName());
     mbedtls_sha256_free(&shaCtx);

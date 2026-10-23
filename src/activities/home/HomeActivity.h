@@ -6,6 +6,7 @@
 #include "RecentBooksStore.h"
 #include "activities/Activity.h"
 #include "components/CoverGridHomeUi.h"
+#include "network/GuestSlot.h"
 #include "util/ButtonNavigator.h"
 
 struct Rect;
@@ -19,6 +20,8 @@ class HomeActivity final : public Activity {
   bool firstRenderDone = false;
   bool hasOpdsServers = false;
   bool hasPlugins = false;
+  guest_slot::Inspection guest;
+  std::string guestLabel;
   // The home "library" slot (index 2) shows Plugins when any plugin is
   // installed, otherwise OPDS. The index converters gate on its presence.
   bool hasLibrarySlot() const { return hasPlugins || hasOpdsServers; }

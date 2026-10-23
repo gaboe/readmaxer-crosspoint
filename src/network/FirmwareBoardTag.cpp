@@ -64,6 +64,7 @@ void Scanner::feed(const uint8_t* data, size_t len) {
           mismatchFound = true;
           return;
         }
+        matchFound = true;
       } else if (nameLen < MAX_NAME && c > 0x20 && c < 0x7F) {
         captured[nameLen++] = c;
       } else {

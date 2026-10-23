@@ -95,4 +95,13 @@ struct ImageHasher {
 bool slotHoldsAppImage(SlotReader read, void* ctx, uint32_t slotSize, uint16_t chipId, const ImageHasher& hasher,
                        uint8_t* buf, uint32_t bufLen);
 
+struct GuestImage {
+  bool installed = false;
+  char version[33]{};
+};
+
+// Reads candidate descriptor and segment bytes. Authenticate the image with
+// slotHoldsAppImage before acting on an Installed result.
+GuestImage inspectGuestImage(SlotReader read, void* ctx, uint32_t slotSize, uint8_t* buf, uint32_t bufLen);
+
 }  // namespace ota_boot

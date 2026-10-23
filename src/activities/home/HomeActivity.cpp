@@ -12,6 +12,7 @@
 #include <Memory.h>
 #include <Utf8.h>
 #include <Xtc.h>
+#include <esp_system.h>
 
 #include <algorithm>
 #include <cstring>
@@ -35,6 +36,7 @@ int HomeActivity::getMenuItemCount() const {
   if (hasLibrarySlot()) {
     count++;
   }
+  if (guest.image.installed) count++;
   return count;
 }
 
@@ -235,9 +237,11 @@ void HomeActivity::onEnter() {
   // even when no SD plugins are installed yet so Plugin Hub can be installed
   // from inside the Plugins screen (or users can sideload plugins manually).
   hasPlugins = SETTINGS.pluginsEnabled != 0;
+  guest = guest_slot::inspect();
+  if (guest.image.installed) guestLabel = std::string(tr(STR_READMAXER)) + " " + guest.image.version;
 
   const auto& metrics = UITheme::getInstance().getMetrics();
-  if (UITheme::getInstance().hasCoverGridHome()) {
+  if (UITheme::getInstance().hasCoverGridHome() && !guest.image.installed) {
     // Screen-lifetime interaction tables and component properties exceed the stack budget.
     coverGridUi = makeUniqueNoThrow<CoverGridHomeUi>(renderer);
     if (!coverGridUi) LOG_ERR("HOME", "OOM: cover grid UI; using standard home");
@@ -329,6 +333,10 @@ void HomeActivity::loop() {
         onSettingsOpen();
         break;
       default:
+        if (guest.image.installed && menuIndex == 4 + static_cast<int>(hasLibrarySlot()) && guest.partition &&
+            ota_boot::switchTo(guest.partition, ota_boot::kOtaImgNew)) {
+          esp_restart();
+        }
         break;
     }
   };
@@ -529,6 +537,11 @@ void HomeActivity::render(RenderLock&&) {
   std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_LIBRARY), tr(STR_FILE_TRANSFER),
                                         tr(STR_SETTINGS_TITLE)};
   std::vector<UIIcon> menuIcons = {Folder, Library, Transfer, Settings};
+
+  if (guest.image.installed) {
+    menuItems.push_back(guestLabel.c_str());
+    menuIcons.push_back(Transfer);
+  }
 
   if (hasLibrarySlot()) {
     menuItems.insert(menuItems.begin() + 2, hasPlugins ? tr(STR_PLUGINS) : tr(STR_OPDS_BROWSER));
