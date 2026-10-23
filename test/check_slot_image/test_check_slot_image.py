@@ -38,6 +38,7 @@ def build_image(segments, chip=9, sha=True, first_addr=0x3C000000):
 
 def app_image(payload_size=200_000, chip=9, extra=b""):
     first = APP_DESC + bytes(252) + extra
+    first += bytes(-len(first) % 4)
     return build_image([first, bytes(range(256)) * (payload_size // 256)], chip=chip)
 
 
@@ -62,6 +63,14 @@ class CheckSlotImageTest(unittest.TestCase):
     def test_first_segment_outside_flash_mapping_is_refused(self):
         image = build_image([APP_DESC + bytes(252), bytes(70_000)], first_addr=0x40374000)
         self.assertIn("not flash-mapped", refused(image))
+
+    def test_image_without_sha_trailer_is_refused(self):
+        image = build_image([APP_DESC + bytes(252), bytes(70_000)], sha=False)
+        self.assertIn("no SHA-256 trailer", refused(image))
+
+    def test_unaligned_segment_length_is_refused(self):
+        image = build_image([APP_DESC + bytes(252), bytes(70_001)])
+        self.assertIn("not 4-byte aligned", refused(image))
 
     def test_truncated_image_is_refused(self):
         self.assertIn("overruns EOF", refused(app_image()[:100_000]))

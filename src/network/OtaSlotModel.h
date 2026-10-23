@@ -88,9 +88,10 @@ struct ImageHasher {
 // count, a first segment in flash-mapped DROM or IROM, 4-byte aligned segment
 // lengths inside `slotSize`, the XOR checksum at the end of the 16-byte
 // padding, and the appended SHA-256 over all bytes before it, which must be
-// present. `buf` holds the segment reads. firmware_flash::validateImageFile and
-// scripts/check_slot_image.py walk the same format for an image file; change
-// them together.
+// present. `buf` holds the segment reads. scripts/check_slot_image.py applies
+// the same rules to a release file, and firmware_flash::validateImageFile walks
+// the same format for an SD file without the alignment and required-SHA rules;
+// change them together.
 bool slotHoldsAppImage(SlotReader read, void* ctx, uint32_t slotSize, uint16_t chipId, const ImageHasher& hasher,
                        uint8_t* buf, uint32_t bufLen);
 

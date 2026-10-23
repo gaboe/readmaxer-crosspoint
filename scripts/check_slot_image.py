@@ -2,8 +2,8 @@
 """Refuse any file that is not a single app image safe to write into an OTA slot.
 
 A Python port of firmware_flash::validateImageFile (src/network/FirmwareFlasher.cpp),
-plus the segment-count and first-segment rules of ota_boot::slotHoldsAppImage, and
-two more rules for this fork: a merged image (bootloader at 0x0 or partition
+plus the segment-count, first-segment, segment-alignment, and required SHA-256
+rules of ota_boot::slotHoldsAppImage, and two more rules for this fork: a merged image (bootloader at 0x0 or partition
 table at 0x8000, such as firmware.factory.bin) is refused, and so is an image
 larger than 0x5C0000, which keeps 0x80000 of headroom in a 0x640000 slot.
 
@@ -84,6 +84,8 @@ def check(data, chip=CHIP_ESP32S3, board=None):
         raise Refused(f"wrong chip: image={image_chip} expected={chip}")
     if not 0 < segment_count <= MAX_SEGMENTS:
         raise Refused(f"bad segment count {segment_count}")
+    if not hash_appended:
+        raise Refused("no SHA-256 trailer")
     if size >= APP_DESC_OFFSET + 4 and struct.unpack_from("<I", data, APP_DESC_OFFSET)[0] != APP_DESC_MAGIC:
         raise Refused("no app descriptor after the first segment header: bootloader at 0x0")
 
@@ -96,6 +98,8 @@ def check(data, chip=CHIP_ESP32S3, board=None):
         load_addr, data_len = struct.unpack_from("<II", data, pos)
         if i == 0 and not _flash_mapped(load_addr):
             raise Refused(f"first segment loads to 0x{load_addr:08X}, not flash-mapped DROM or IROM")
+        if data_len % 4:
+            raise Refused(f"segment {i} length {data_len} is not 4-byte aligned")
         pos += SEGMENT_HEADER_SIZE
         if pos + data_len > size:
             raise Refused(f"segment {i} data overruns EOF ({pos} + {data_len} > {size})")
