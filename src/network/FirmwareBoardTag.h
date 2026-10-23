@@ -11,9 +11,8 @@
 //
 // The tag is "CROSSPOINT-BOARD-V1:<board>;" stored once in .rodata — the
 // scanner's needle references the same array, so a CrossPoint image contains
-// exactly one occurrence. Images without a tag (other projects, forks, older
-// releases) are allowed: the guard only rejects a tag naming a DIFFERENT
-// board.
+// exactly one occurrence. On X4 Pro, the SD update also requires this board
+// tag and the fork identity marker. Other boards retain the mismatch-only rule.
 
 namespace board_tag {
 

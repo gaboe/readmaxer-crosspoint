@@ -83,6 +83,8 @@ struct ImageHasher {
   bool (*finish)(void* ctx, uint8_t (&digest)[32]);
 };
 
+using SegmentVisitor = void (*)(const uint8_t* data, uint32_t len, void* ctx);
+
 // Full check that a slot holds an ESP32-S3 app image for `chipId`, as the
 // bootloader checks it before it boots the image: magic, chip id, segment
 // count, a first segment in flash-mapped DROM or IROM, 4-byte aligned segment
@@ -93,15 +95,6 @@ struct ImageHasher {
 // the same format for an SD file without the alignment and required-SHA rules;
 // change them together.
 bool slotHoldsAppImage(SlotReader read, void* ctx, uint32_t slotSize, uint16_t chipId, const ImageHasher& hasher,
-                       uint8_t* buf, uint32_t bufLen);
-
-struct GuestImage {
-  bool installed = false;
-  char version[33]{};
-};
-
-// Reads candidate descriptor and segment bytes. Authenticate the image with
-// slotHoldsAppImage before acting on an Installed result.
-GuestImage inspectGuestImage(SlotReader read, void* ctx, uint32_t slotSize, uint8_t* buf, uint32_t bufLen);
+                       uint8_t* buf, uint32_t bufLen, SegmentVisitor visitor = nullptr, void* visitorCtx = nullptr);
 
 }  // namespace ota_boot

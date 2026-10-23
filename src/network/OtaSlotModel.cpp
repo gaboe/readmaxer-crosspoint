@@ -47,58 +47,6 @@ int activeEntry(const SelectEntry (&entries)[kEntrySectors]) {
 
 uint32_t entrySlot(const SelectEntry& entry) { return (entry.ota_seq - 1u) % kSlotCount; }
 
-GuestImage inspectGuestImage(SlotReader read, void* ctx, uint32_t slotSize, uint8_t* buf, uint32_t bufLen) {
-  GuestImage result;
-  constexpr char marker[] = "READMAXER-GUEST-V1;";
-  constexpr char project[] = "readmaxer-xteink-x4pro";
-  if (!buf || bufLen == 0 || slotSize < 32) return result;
-  uint8_t header[32];
-  if (!read(0, header, sizeof(header), ctx) || header[0] != kImageMagic || header[1] == 0 || header[1] > kMaxSegments)
-    return result;
-  uint32_t firstLength;
-  std::memcpy(&firstLength, header + 28, sizeof(firstLength));
-  if (firstLength < 80 || firstLength > slotSize - 32) return result;
-  uint8_t descriptor[80];
-  if (!read(32, descriptor, sizeof(descriptor), ctx)) return result;
-  uint32_t magic;
-  std::memcpy(&magic, descriptor, sizeof(magic));
-  if (magic != 0xABCD5432 || std::memcmp(descriptor + 48, project, sizeof(project)) != 0 ||
-      std::memchr(descriptor + 16, 0, 32) == nullptr)
-    return result;
-  std::memcpy(result.version, descriptor + 16, 32);
-
-  uint32_t pos = 24;
-  uint32_t occurrences = 0;
-  size_t matched = 0;
-  for (uint8_t segment = 0; segment < header[1]; ++segment) {
-    uint8_t segmentHeader[8];
-    if (pos > slotSize - 8 || !read(pos, segmentHeader, 8, ctx)) return {};
-    pos += 8;
-    uint32_t length;
-    std::memcpy(&length, segmentHeader + 4, sizeof(length));
-    if (length > slotSize - pos) return {};
-    for (uint32_t left = length; left > 0;) {
-      const uint32_t chunk = left < bufLen ? left : bufLen;
-      if (!read(pos, buf, chunk, ctx)) return {};
-      for (uint32_t i = 0; i < chunk; ++i) {
-        const char c = static_cast<char>(buf[i]);
-        if (c == marker[matched]) {
-          if (++matched == sizeof(marker) - 1) {
-            if (++occurrences > 1) return {};
-            matched = 0;
-          }
-        } else {
-          matched = c == marker[0] ? 1 : 0;
-        }
-      }
-      pos += chunk;
-      left -= chunk;
-    }
-  }
-  result.installed = occurrences == 1;
-  return result;
-}
-
 EntryWrite planSelect(const SelectEntry (&entries)[kEntrySectors], uint32_t slot, uint32_t state) {
   const int active = activeEntry(entries);
   const uint32_t activeSeq = active < 0 ? 0 : entries[active].ota_seq;
@@ -141,7 +89,7 @@ bool planKeepRunningSlot(const SelectEntry (&entries)[kEntrySectors], uint32_t r
 }
 
 bool slotHoldsAppImage(SlotReader read, void* ctx, uint32_t slotSize, uint16_t chipId, const ImageHasher& hasher,
-                       uint8_t* buf, uint32_t bufLen) {
+                       uint8_t* buf, uint32_t bufLen, SegmentVisitor visitor, void* visitorCtx) {
   uint8_t header[kImageHeaderSize];
   if (slotSize < kImageHeaderSize || bufLen < 16 || !read(0, header, kImageHeaderSize, ctx)) return false;
   const uint8_t segmentCount = header[1];
@@ -151,6 +99,7 @@ bool slotHoldsAppImage(SlotReader read, void* ctx, uint32_t slotSize, uint16_t c
       !hasher.update(hasher.ctx, header, kImageHeaderSize)) {
     return false;
   }
+  if (visitor) visitor(header, kImageHeaderSize, visitorCtx);
 
   uint8_t checksum = kChecksumSeed;
   uint32_t pos = kImageHeaderSize;
@@ -160,6 +109,7 @@ bool slotHoldsAppImage(SlotReader read, void* ctx, uint32_t slotSize, uint16_t c
         !hasher.update(hasher.ctx, segmentHeader, kSegmentHeaderSize)) {
       return false;
     }
+    if (visitor) visitor(segmentHeader, kSegmentHeaderSize, visitorCtx);
     pos += kSegmentHeaderSize;
     uint32_t loadAddress;
     uint32_t dataLen;
@@ -169,6 +119,7 @@ bool slotHoldsAppImage(SlotReader read, void* ctx, uint32_t slotSize, uint16_t c
     for (uint32_t left = dataLen; left > 0;) {
       const uint32_t chunk = left < bufLen ? left : bufLen;
       if (!read(pos, buf, chunk, ctx) || !hasher.update(hasher.ctx, buf, chunk)) return false;
+      if (visitor) visitor(buf, chunk, visitorCtx);
       for (uint32_t b = 0; b < chunk; ++b) checksum ^= buf[b];
       pos += chunk;
       left -= chunk;
@@ -184,11 +135,15 @@ bool slotHoldsAppImage(SlotReader read, void* ctx, uint32_t slotSize, uint16_t c
       !hasher.update(hasher.ctx, buf, padLen)) {
     return false;
   }
+  if (visitor) visitor(buf, padLen, visitorCtx);
 
   uint8_t stored[kShaTrailer];
   uint8_t computed[kShaTrailer];
-  return kShaTrailer <= slotSize - padEnd && read(padEnd, stored, kShaTrailer, ctx) &&
-         hasher.finish(hasher.ctx, computed) && std::memcmp(stored, computed, kShaTrailer) == 0;
+  if (kShaTrailer > slotSize - padEnd || !read(padEnd, stored, kShaTrailer, ctx) ||
+      !hasher.finish(hasher.ctx, computed) || std::memcmp(stored, computed, kShaTrailer) != 0)
+    return false;
+  if (visitor) visitor(stored, kShaTrailer, visitorCtx);
+  return true;
 }
 
 }  // namespace ota_boot

@@ -14,6 +14,9 @@
 #include <memory>
 
 #include "FirmwareBoardTag.h"
+#include "FirmwareHostTag.h"
+#include "GuestSlot.h"
+#include "GuestSlotModel.h"
 #include "OtaBootSwitch.h"
 
 namespace firmware_flash {
@@ -52,6 +55,10 @@ const char* resultName(Result r) {
       return "BAD_CHIP";
     case Result::WRONG_BOARD:
       return "WRONG_BOARD";
+    case Result::WRONG_FORK:
+      return "WRONG_FORK";
+    case Result::GUEST_IMAGE:
+      return "GUEST_IMAGE";
     case Result::BAD_SIZE:
       return "BAD_SIZE";
     case Result::NO_PARTITION:
@@ -93,7 +100,8 @@ namespace {
 // both the XOR-checksum and SHA256 accumulators. Used by validateImageFile so the whole image
 // is verified end-to-end without holding it in RAM (ESP32-C3 only has ~380 KB).
 Result feedHashAndChecksum(HalFile& file, size_t length, uint8_t* xorAccum, mbedtls_sha256_context* sha, uint8_t* buf,
-                           board_tag::Scanner* tagScanner) {
+                           board_tag::Scanner* tagScanner, host_tag::Scanner* hostScanner = nullptr,
+                           guest_slot::Scanner* guestScanner = nullptr) {
   size_t remaining = length;
   while (remaining > 0) {
     const size_t want = std::min<size_t>(CHUNK, remaining);
@@ -101,6 +109,8 @@ Result feedHashAndChecksum(HalFile& file, size_t length, uint8_t* xorAccum, mbed
     if (got <= 0 || static_cast<size_t>(got) != want) return Result::READ_FAIL;
     if (sha) mbedtls_sha256_update(sha, buf, want);
     if (tagScanner) tagScanner->feed(buf, want);
+    if (hostScanner) hostScanner->feed(buf, want);
+    if (guestScanner) guestScanner->feed(buf, want);
     if (xorAccum) {
       uint8_t acc = *xorAccum;
       for (size_t i = 0; i < want; i++) acc ^= buf[i];
@@ -171,10 +181,11 @@ Result validateImageFile(const char* sdPath, size_t partitionSize) {
 
   uint8_t xorAccum = CHECKSUM_SEED;
   size_t pos = HEADER_SIZE;
-  // Board tag: scanned from the same segment stream the hash pass already
-  // reads, so the check is free of extra I/O. Only a present-and-mismatched
-  // tag rejects; untagged images (forks, other projects) pass.
   board_tag::Scanner tagScanner;
+  host_tag::Scanner hostScanner;
+  guest_slot::Scanner guestScanner;
+  hostScanner.feed(header, HEADER_SIZE);
+  guestScanner.feed(header, HEADER_SIZE);
 
   for (uint8_t i = 0; i < segCount; i++) {
     if (pos + SEG_HEADER_SIZE > fileSize) {
@@ -190,6 +201,8 @@ Result validateImageFile(const char* sdPath, size_t partitionSize) {
       return Result::READ_FAIL;
     }
     mbedtls_sha256_update(&shaCtx, segHdr, SEG_HEADER_SIZE);
+    hostScanner.feed(segHdr, SEG_HEADER_SIZE);
+    guestScanner.feed(segHdr, SEG_HEADER_SIZE);
     pos += SEG_HEADER_SIZE;
 
     uint32_t dataLen;
@@ -202,7 +215,8 @@ Result validateImageFile(const char* sdPath, size_t partitionSize) {
       return Result::BAD_SEGMENTS;
     }
 
-    const Result feedRes = feedHashAndChecksum(file, dataLen, &xorAccum, &shaCtx, buf.get(), &tagScanner);
+    const Result feedRes =
+        feedHashAndChecksum(file, dataLen, &xorAccum, &shaCtx, buf.get(), &tagScanner, &hostScanner, &guestScanner);
     if (feedRes != Result::OK) {
       mbedtls_sha256_free(&shaCtx);
       file.close();
@@ -211,17 +225,15 @@ Result validateImageFile(const char* sdPath, size_t partitionSize) {
     pos += dataLen;
   }
 
-  if (tagScanner.mismatch()
-#if FREEINK_DEVICE_X4PRO
-      || !tagScanner.matched()
-#endif
-  ) {
+#if !FREEINK_DEVICE_X4PRO
+  if (tagScanner.mismatch()) {
     LOG_ERR("FLASH", "validate: wrong board: image=%s device=%.*s", tagScanner.foundName(),
             static_cast<int>(board_tag::boardNameLen()), board_tag::boardName());
     mbedtls_sha256_free(&shaCtx);
     file.close();
     return Result::WRONG_BOARD;
   }
+#endif
 
   // pad_end is the 16-byte aligned offset at which the checksum byte sits at pad_end - 1.
   const size_t padEnd = (pos + 16) & ~static_cast<size_t>(15);
@@ -249,6 +261,8 @@ Result validateImageFile(const char* sdPath, size_t partitionSize) {
     return Result::READ_FAIL;
   }
   mbedtls_sha256_update(&shaCtx, padBuf, padLen);
+  hostScanner.feed(padBuf, padLen);
+  guestScanner.feed(padBuf, padLen);
 
   const uint8_t storedChecksum = padBuf[padLen - 1];
   if ((xorAccum & 0xFF) != storedChecksum) {
@@ -267,6 +281,8 @@ Result validateImageFile(const char* sdPath, size_t partitionSize) {
       file.close();
       return Result::READ_FAIL;
     }
+    hostScanner.feed(stored, SHA_TRAILER);
+    guestScanner.feed(stored, SHA_TRAILER);
     if (std::memcmp(computed, stored, SHA_TRAILER) != 0) {
       LOG_ERR("FLASH", "validate: SHA256 mismatch");
       mbedtls_sha256_free(&shaCtx);
@@ -274,6 +290,18 @@ Result validateImageFile(const char* sdPath, size_t partitionSize) {
       return Result::BAD_SHA;
     }
   }
+
+#if FREEINK_DEVICE_X4PRO
+  const auto identity =
+      host_tag::classify(tagScanner.matched(), tagScanner.mismatch(), hostScanner, guestScanner.exactlyOne());
+  if (identity != host_tag::Identity::Host) {
+    mbedtls_sha256_free(&shaCtx);
+    file.close();
+    if (identity == host_tag::Identity::Guest) return Result::GUEST_IMAGE;
+    if (identity == host_tag::Identity::WrongBoard) return Result::WRONG_BOARD;
+    return Result::WRONG_FORK;
+  }
+#endif
 
   mbedtls_sha256_free(&shaCtx);
   file.close();
@@ -331,6 +359,7 @@ Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx) {
   // While the boot fallback is armed, otadata selects `dest`. Select the
   // running slot first so an interrupted write never leaves a partial image selected.
   if (!ota_boot::keepRunningSlot()) return Result::OTADATA_FAIL;
+  guest_slot::invalidateCache();
 
   HalFile file;
   if (!Storage.openFileForRead("FLASH", sdPath, file) || !file) {

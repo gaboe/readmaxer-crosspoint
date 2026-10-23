@@ -345,7 +345,7 @@ Settings are grouped into **System**, **Display**, **Reader**, **Controls**, **L
 
 - **Rebuild library index**: Rescan the SD card for books while preserving the arrival history of books already in the index.
 
-- **SD Card Firmware Update**: Update the firmware without a USB connection by placing a `firmware.bin` file on the SD card. This option is not available on the BOOX Picco, which is updated over USB.
+- **SD Card Firmware Update**: Update the firmware without a USB connection by placing a `firmware.bin` file on the SD card. On the X4 Pro READMAXER fork, this accepts only a CrossPoint fork image for the X4 Pro. Install a READMAXER guest image with READMAXER install. The Home screen shows **READMAXER** and its version only when the other slot holds a verified guest image and the fork boot is confirmed. Select the item to start READMAXER. This option is not available on the BOOX Picco, which is updated over USB.
 
 - **Plugins** (**Settings → Connectivity**): Enable or disable SD-card plugins. Clean installs start disabled; upgrades with existing plugins are kept enabled automatically. Disabling plugins leaves all plugin files on the SD card but stops plugin discovery and execution until they are enabled again.
   - Enabling plugins immediately adds **Plugins** to the Home screen, even when no plugins are installed yet. Sideloaded SD-card plugins work without Plugin Hub.

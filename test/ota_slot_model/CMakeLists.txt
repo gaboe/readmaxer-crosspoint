@@ -1,6 +1,7 @@
 add_executable(OtaSlotModelTest
   OtaSlotModelTest.cpp
   ${REPO_ROOT}/src/network/OtaSlotModel.cpp
+  ${REPO_ROOT}/src/network/GuestSlotModel.cpp
 )
 
 target_include_directories(OtaSlotModelTest PRIVATE

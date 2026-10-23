@@ -12,7 +12,6 @@
 #include <Memory.h>
 #include <Utf8.h>
 #include <Xtc.h>
-#include <esp_system.h>
 
 #include <algorithm>
 #include <cstring>
@@ -24,6 +23,7 @@
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
+#include "SilentRestart.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "network/OtaBootSwitch.h"
@@ -237,7 +237,8 @@ void HomeActivity::onEnter() {
   // even when no SD plugins are installed yet so Plugin Hub can be installed
   // from inside the Plugins screen (or users can sideload plugins manually).
   hasPlugins = SETTINGS.pluginsEnabled != 0;
-  guest = guest_slot::inspect();
+  firstRenderDone = false;
+  guest = guest_slot::switchAllowed() ? guest_slot::inspect() : guest_slot::Inspection{};
   if (guest.image.installed) guestLabel = std::string(tr(STR_READMAXER)) + " " + guest.image.version;
 
   const auto& metrics = UITheme::getInstance().getMetrics();
@@ -307,6 +308,7 @@ void HomeActivity::freeCoverBuffer() {
 }
 
 void HomeActivity::loop() {
+  if (!firstRenderDone) return;
   const int menuCount = getMenuItemCount();
   const auto& metrics = UITheme::getInstance().getMetrics();
 
@@ -333,9 +335,11 @@ void HomeActivity::loop() {
         onSettingsOpen();
         break;
       default:
-        if (guest.image.installed && menuIndex == 4 + static_cast<int>(hasLibrarySlot()) && guest.partition &&
-            ota_boot::switchTo(guest.partition, ota_boot::kOtaImgNew)) {
-          esp_restart();
+        if (guest.image.installed && menuIndex == 4 + static_cast<int>(hasLibrarySlot())) {
+          if (guest_slot::switchGuest())
+            silentRestart();
+          else
+            GUI.drawPopup(renderer, tr(STR_UPDATE_FAILED));
         }
         break;
     }

@@ -2,16 +2,14 @@
 
 #include <BoardConfig.h>
 #include <Logging.h>
-#include <esp_heap_caps.h>
 #include <esp_ota_ops.h>
 #include <esp_system.h>
 #include <esp_timer.h>
-#include <mbedtls/sha256.h>
 #include <spi_flash_mmap.h>
 
 #include <atomic>
 
-#include "FirmwareFlasher.h"
+#include "GuestSlot.h"
 
 #if FREEINK_DEVICE_X4PRO
 // initArduino() marks a PENDING_VERIFY image valid before setup() unless this
@@ -25,6 +23,7 @@ namespace ota_boot {
 namespace {
 
 std::atomic<bool> pendingConfirmation{false};
+std::atomic<bool> runningConfirmed{false};
 bool selectedOtherSlot = false;
 int64_t imageCheckUs = -1;
 
@@ -55,36 +54,6 @@ bool writeEntry(const esp_partition_t* otadata, const EntryWrite& write) {
 }
 
 #if FREEINK_DEVICE_X4PRO
-constexpr uint32_t kImageCheckChunk = 4096;
-
-bool readSlot(uint32_t offset, void* dst, uint32_t len, void* ctx) {
-  return esp_partition_read(static_cast<const esp_partition_t*>(ctx), offset, dst, len) == ESP_OK;
-}
-
-bool shaUpdate(void* ctx, const uint8_t* data, uint32_t len) {
-  return mbedtls_sha256_update(static_cast<mbedtls_sha256_context*>(ctx), data, len) == 0;
-}
-
-bool shaFinish(void* ctx, uint8_t (&digest)[32]) {
-  return mbedtls_sha256_finish(static_cast<mbedtls_sha256_context*>(ctx), digest) == 0;
-}
-
-bool otherSlotHoldsImage(const esp_partition_t* other) {
-  const uint16_t chipId = firmware_flash::runningPartitionChipId();
-  if (!other || chipId == 0xFFFF) return false;
-  // Internal RAM, freed after the check: SHA hardware may read it by DMA.
-  auto* const buf = static_cast<uint8_t*>(heap_caps_malloc(kImageCheckChunk, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-  if (!buf) return false;
-  mbedtls_sha256_context sha;
-  mbedtls_sha256_init(&sha);
-  const ImageHasher hasher{&sha, shaUpdate, shaFinish};
-  const bool holds = mbedtls_sha256_starts(&sha, /*is224=*/0) == 0 &&
-                     slotHoldsAppImage(readSlot, const_cast<esp_partition_t*>(other), other->size, chipId, hasher, buf,
-                                       kImageCheckChunk);
-  mbedtls_sha256_free(&sha);
-  heap_caps_free(buf);
-  return holds;
-}
 #endif
 
 }  // namespace
@@ -106,6 +75,7 @@ bool switchTo(const esp_partition_t* dest, const uint32_t state) {
     LOG_ERR("BOOT", "otadata write failed (sector=%u)", static_cast<unsigned>(write.sector));
     return false;
   }
+  runningConfirmed = dest == esp_ota_get_running_partition() && state == kOtaImgValid;
   LOG_INF("BOOT", "otadata: wrote sector=%u seq=%u state=%u -> %s", static_cast<unsigned>(write.sector),
           static_cast<unsigned>(write.entry.ota_seq), static_cast<unsigned>(state), dest->label);
   return true;
@@ -120,6 +90,7 @@ void armBootFallback() {
 
   const auto runningSlot = static_cast<uint32_t>(running);
   const BootPlan plan = planBoot(entries, runningSlot, esp_reset_reason() == ESP_RST_DEEPSLEEP);
+  runningConfirmed = checkRunningSlot(entries, runningSlot) == SlotCheck::Confirmed;
   pendingConfirmation = plan.confirmAfterHome;
   if (!plan.armFallback) return;
 
@@ -128,9 +99,12 @@ void armBootFallback() {
       ESP_PARTITION_TYPE_APP, static_cast<esp_partition_subtype_t>(ESP_PARTITION_SUBTYPE_APP_OTA_0 + otherSlot),
       nullptr);
   const int64_t started = esp_timer_get_time();
-  const bool holds = otherSlotHoldsImage(other);
+  const bool holds = guest_slot::checkAndCache(other);
   imageCheckUs = esp_timer_get_time() - started;
-  if (holds) selectedOtherSlot = writeEntry(otadata, planSelect(entries, otherSlot, kOtaImgValid));
+  if (holds) {
+    selectedOtherSlot = writeEntry(otadata, planSelect(entries, otherSlot, kOtaImgValid));
+    if (selectedOtherSlot) runningConfirmed = false;
+  }
 #endif
 }
 
@@ -150,6 +124,7 @@ bool keepRunningSlot() {
     return false;
   }
   selectedOtherSlot = false;
+  runningConfirmed = false;
   LOG_INF("BOOT", "running slot kept for the next boot (sector=%u seq=%u state=NEW)",
           static_cast<unsigned>(write.sector), static_cast<unsigned>(write.entry.ota_seq));
   return true;
@@ -171,5 +146,15 @@ bool confirmRunningSlot() {
 }
 
 bool confirmationPending() { return pendingConfirmation; }
+
+bool runningSlotConfirmed() { return runningConfirmed; }
+
+SlotCheck runningSlotCheck() {
+  const int running = otaSlotOf(esp_ota_get_running_partition());
+  const esp_partition_t* otadata = findOtadata();
+  SelectEntry entries[kEntrySectors];
+  if (running < 0 || !otadata || !readEntries(otadata, entries)) return SlotCheck::Unconfirmed;
+  return checkRunningSlot(entries, static_cast<uint32_t>(running));
+}
 
 }  // namespace ota_boot

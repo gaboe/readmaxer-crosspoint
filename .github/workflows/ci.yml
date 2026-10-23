@@ -156,6 +156,8 @@ jobs:
 
       - name: Check slot image
         run: python3 scripts/check_slot_image.py --board x4pro .pio/build/${{ matrix.env }}/firmware.bin
+      - name: Check fork identity markers
+        run: python3 scripts/check_fork_markers.py .pio/build/${{ matrix.env }}/firmware.bin
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v6

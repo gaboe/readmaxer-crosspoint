@@ -6,7 +6,8 @@
 #include <iterator>
 #include <vector>
 
-#include "OtaSlotModel.h"
+#include "FirmwareHostTag.h"
+#include "GuestSlotModel.h"
 
 namespace {
 
@@ -17,12 +18,11 @@ bool readBytes(uint32_t offset, void* dst, uint32_t len, void* ctx) {
   return true;
 }
 
-ota_boot::GuestImage inspect(std::vector<uint8_t>& bytes) {
-  uint8_t buf[17];
-  return ota_boot::inspectGuestImage(readBytes, &bytes, bytes.size(), buf, sizeof(buf));
+guest_slot::GuestImage inspect(std::vector<uint8_t>& bytes) {
+  return guest_slot::inspectHeader(readBytes, &bytes, bytes.size());
 }
 
-std::vector<uint8_t> image(const char* project, const char* marker = nullptr) {
+std::vector<uint8_t> image(const char* project) {
   std::vector<uint8_t> bytes(32 + 256, 0);
   bytes[0] = 0xE9;
   bytes[1] = 1;
@@ -32,40 +32,86 @@ std::vector<uint8_t> image(const char* project, const char* marker = nullptr) {
   std::memcpy(bytes.data() + 32, &magic, 4);
   std::memcpy(bytes.data() + 48, "1.2.3", 6);
   std::memcpy(bytes.data() + 80, project, std::strlen(project));
-  if (marker) std::memcpy(bytes.data() + 32 + 160, marker, std::strlen(marker));
   return bytes;
+}
+
+bool hasGuestMarker(const std::vector<uint8_t>& bytes, size_t chunk = 17) {
+  guest_slot::Scanner scanner;
+  for (size_t pos = 0; pos < bytes.size(); pos += chunk)
+    scanner.feed(bytes.data() + pos, std::min(chunk, bytes.size() - pos));
+  return scanner.exactlyOne();
 }
 
 }  // namespace
 
-TEST(GuestSlot, AbsentAndWrongProject) {
+TEST(GuestSlot, DescriptorRejectsAbsentWrongProjectAndCorruption) {
   std::vector<uint8_t> absent(4096, 0xFF);
   EXPECT_FALSE(inspect(absent).installed);
-  auto crosspoint = image("crosspoint-reader", "READMAXER-GUEST-V1;");
+  auto crosspoint = image("crosspoint-reader");
   EXPECT_FALSE(inspect(crosspoint).installed);
-  auto wrong = image("readmaxer-xteink-x4", "READMAXER-GUEST-V1;");
+  auto wrong = image("readmaxer-xteink-x4");
   EXPECT_FALSE(inspect(wrong).installed);
-}
-
-TEST(GuestSlot, MarkerAndVersion) {
-  auto guest = image("readmaxer-xteink-x4pro", "READMAXER-GUEST-V1;");
-  const auto installed = inspect(guest);
-  EXPECT_TRUE(installed.installed);
-  EXPECT_STREQ(installed.version, "1.2.3");
-  guest.insert(guest.end(), 20, 0);
-  std::memcpy(guest.data() + 32 + 200, "READMAXER-GUEST-V1;", 19);
-  EXPECT_FALSE(inspect(guest).installed);
+  auto guest = image("readmaxer-xteink-x4pro");
+  EXPECT_TRUE(inspect(guest).installed);
+  EXPECT_STREQ(inspect(guest).version, "1.2.3");
   guest[32] ^= 1;
   EXPECT_FALSE(inspect(guest).installed);
 }
 
-TEST(GuestSlot, ExistingImagesHaveNoGuestMarker) {
-  for (const char* key : {"CP2_PROBE_IMAGE", "CP2_FORK_IMAGE"}) {
-    const char* path = std::getenv(key);
-    ASSERT_NE(path, nullptr) << key;
-    std::ifstream file(path, std::ios::binary);
-    ASSERT_TRUE(file.good()) << path;
-    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-    EXPECT_FALSE(inspect(bytes).installed) << path;
-  }
+TEST(GuestSlot, DescriptorRejectsOversizedAndTornImages) {
+  auto guest = image("readmaxer-xteink-x4pro");
+  uint32_t oversized = 4096;
+  std::memcpy(guest.data() + 28, &oversized, 4);
+  EXPECT_FALSE(inspect(guest).installed);
+  guest = image("readmaxer-xteink-x4pro");
+  guest.resize(64);
+  EXPECT_FALSE(inspect(guest).installed);
+  guest = image("readmaxer-xteink-x4pro");
+  std::memset(guest.data() + 48, 'x', 32);
+  EXPECT_FALSE(inspect(guest).installed);
+}
+
+TEST(GuestSlot, CountsMarkersAcrossChunksAndAfterPartialPrefixes) {
+  const char marker[] = "READMAXER-GUEST-V1;";
+  std::vector<uint8_t> one(marker, marker + sizeof(marker) - 1);
+  EXPECT_TRUE(hasGuestMarker(one, 1));
+  one.insert(one.begin(), {'R', 'E', 'A', 'D', 'M', 'A', 'X', 'E'});
+  EXPECT_TRUE(hasGuestMarker(one, 3));
+  one.insert(one.end(), marker, marker + sizeof(marker) - 1);
+  EXPECT_FALSE(hasGuestMarker(one, 2));
+  EXPECT_FALSE(hasGuestMarker(std::vector<uint8_t>{'R', 'E', 'A', 'D'}));
+}
+
+TEST(GuestSlot, HostMarkerRequiresExactlyOneOccurrence) {
+  host_tag::Scanner scanner;
+  EXPECT_EQ(host_tag::classify(true, false, scanner, false), host_tag::Identity::WrongFork);
+  EXPECT_EQ(host_tag::classify(false, false, scanner, true), host_tag::Identity::Guest);
+  const char* tag = host_tag::TAG;
+  scanner.feed(reinterpret_cast<const uint8_t*>(tag), 3);
+  scanner.feed(reinterpret_cast<const uint8_t*>(tag + 3), std::strlen(tag) - 3);
+  EXPECT_TRUE(scanner.exactlyOne());
+  EXPECT_EQ(host_tag::classify(true, false, scanner, false), host_tag::Identity::Host);
+  EXPECT_EQ(host_tag::classify(false, false, scanner, true), host_tag::Identity::WrongBoard);
+  EXPECT_EQ(host_tag::classify(true, true, scanner, false), host_tag::Identity::WrongBoard);
+  scanner.feed(reinterpret_cast<const uint8_t*>(tag), std::strlen(tag));
+  EXPECT_FALSE(scanner.exactlyOne());
+  EXPECT_EQ(host_tag::classify(true, false, scanner, false), host_tag::Identity::WrongFork);
+}
+
+TEST(GuestSlot, OptionalProbeImageIsNotGuest) {
+  const char* path = std::getenv("CP2_PROBE_IMAGE");
+  if (!path) GTEST_SKIP() << "CP2_PROBE_IMAGE is optional";
+  std::ifstream file(path, std::ios::binary);
+  ASSERT_TRUE(file.good()) << path;
+  std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+  EXPECT_FALSE(inspect(bytes).installed && hasGuestMarker(bytes));
+}
+
+TEST(GuestSlot, OptionalForkImageIsNotGuest) {
+  const char* path = std::getenv("CP2_FORK_IMAGE");
+  if (!path) GTEST_SKIP() << "CP2_FORK_IMAGE is optional";
+  std::ifstream file(path, std::ios::binary);
+  ASSERT_TRUE(file.good()) << path;
+  std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+  EXPECT_FALSE(inspect(bytes).installed && hasGuestMarker(bytes));
 }

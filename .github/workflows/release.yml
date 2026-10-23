@@ -71,6 +71,8 @@ jobs:
 
       - name: Check slot image
         run: python3 scripts/check_slot_image.py --board x4pro .pio/build/x4pro/firmware.bin
+      - name: Check fork identity markers
+        run: python3 scripts/check_fork_markers.py .pio/build/x4pro/firmware.bin
 
       - name: Stage firmware asset
         uses: actions/upload-artifact@v6

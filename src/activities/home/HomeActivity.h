@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <functional>
 #include <vector>
 
@@ -17,7 +18,7 @@ class HomeActivity final : public Activity {
   int selectorIndex = 0;
   bool recentsLoading = false;
   bool recentsLoaded = false;
-  bool firstRenderDone = false;
+  std::atomic<bool> firstRenderDone{false};
   bool hasOpdsServers = false;
   bool hasPlugins = false;
   guest_slot::Inspection guest;

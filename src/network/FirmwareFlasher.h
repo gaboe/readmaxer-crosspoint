@@ -23,7 +23,9 @@ enum class Result {
   BAD_CHECKSUM,  // ESP image XOR checksum mismatch
   BAD_SHA,       // SHA256 trailer mismatch (hash_appended images)
   BAD_CHIP,      // image chip_id doesn't match the running MCU family
-  WRONG_BOARD,   // image carries a board tag naming a different board
+  WRONG_BOARD,   // image lacks the board tag or names a different board
+  WRONG_FORK,    // X4 Pro image lacks exactly one fork identity marker
+  GUEST_IMAGE,   // READMAXER guest belongs in the READMAXER installer
   BAD_SIZE,      // body+pad+sha length doesn't match file size
   NO_PARTITION,
   OOM,
@@ -48,6 +50,7 @@ Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx);
 // header magic, segment table walk, XOR checksum, and SHA256 trailer (when
 // hash_appended == 1). Also scans for the embedded board tag (see
 // FirmwareBoardTag.h) and rejects an image tagged for a different board.
+// X4 Pro also requires exactly one READMAXER host marker.
 // Run this before flashing a candidate firmware so a truncated/corrupted/
 // wrong-board .bin never reaches otadata.
 //

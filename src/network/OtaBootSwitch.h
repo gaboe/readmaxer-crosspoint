@@ -43,5 +43,9 @@ bool confirmRunningSlot();
 
 // True from armBootFallback() until confirmRunningSlot() succeeds.
 bool confirmationPending();
+// Cached boot/otadata state for Home display. Use runningSlotCheck() before a write.
+bool runningSlotConfirmed();
+// Read otadata now and classify its active entry.
+SlotCheck runningSlotCheck();
 
 }  // namespace ota_boot

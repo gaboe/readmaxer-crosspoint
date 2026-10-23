@@ -1,6 +1,7 @@
 add_executable(GuestSlotTest
   GuestSlotTest.cpp
-  ${REPO_ROOT}/src/network/OtaSlotModel.cpp
+  ${REPO_ROOT}/src/network/GuestSlotModel.cpp
+  ${REPO_ROOT}/src/network/FirmwareHostTag.cpp
 )
 
 target_include_directories(GuestSlotTest PRIVATE ${REPO_ROOT}/src/network)

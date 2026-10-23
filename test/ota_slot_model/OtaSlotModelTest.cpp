@@ -3,6 +3,7 @@
 #include <cstring>
 #include <vector>
 
+#include "GuestSlotModel.h"
 #include "OtaSlotModel.h"
 
 using namespace ota_boot;
@@ -124,6 +125,23 @@ TEST(OtaSlotModel, GuestSwitchIsNewAndPreservesForkSectorOnTornWrite) {
       apply(data, guestWrite);
       EXPECT_EQ(bootloaderSelect(data, true), 1 - forkSlot);
       EXPECT_EQ(bootloaderSelect(data, true), forkSlot);
+    }
+  }
+}
+
+TEST(OtaSlotModel, ArmedFallbackNeverPermitsGuestSwitchToEraseForkSector) {
+  for (uint32_t forkSlot = 0; forkSlot < kSlotCount; ++forkSlot) {
+    for (uint32_t forkSector = 0; forkSector < kEntrySectors; ++forkSector) {
+      Otadata data = {blankEntry(), blankEntry()};
+      data[forkSector] = entry(forkSlot + 1, kOtaImgValid);
+      const EntryWrite armed = planSelect(data, 1 - forkSlot, kOtaImgValid);
+      apply(data, armed);
+      ASSERT_EQ(checkRunningSlot(data, forkSlot), SlotCheck::FellBack);
+      EXPECT_FALSE(guest_slot::canSwitch(checkRunningSlot(data, forkSlot), true));
+      EXPECT_FALSE(guest_slot::canSwitch(checkRunningSlot(data, forkSlot), false));
+      const EntryWrite unsafe = planSelect(data, 1 - forkSlot, kOtaImgNew);
+      EXPECT_EQ(unsafe.sector, forkSector);
+      EXPECT_EQ(data[forkSector].ota_state, kOtaImgValid);
     }
   }
 }
@@ -415,7 +433,8 @@ bool readVector(uint32_t offset, void* dst, uint32_t len, void* ctx) {
   return true;
 }
 
-bool holds(std::vector<uint8_t> slot, uint32_t slotSize, uint16_t chip = kChipS3) {
+bool holds(std::vector<uint8_t> slot, uint32_t slotSize, uint16_t chip = kChipS3,
+           guest_slot::Scanner* scanner = nullptr) {
   Sha256 sha;
   const ImageHasher hasher{&sha,
                            [](void* ctx, const uint8_t* data, uint32_t len) {
@@ -428,7 +447,11 @@ bool holds(std::vector<uint8_t> slot, uint32_t slotSize, uint16_t chip = kChipS3
                            }};
   uint8_t buf[64];  // smaller than a segment, so the chunk loop runs
   slot.resize(std::max<size_t>(slot.size(), slotSize), 0xFF);
-  return slotHoldsAppImage(readVector, &slot, slotSize, chip, hasher, buf, sizeof(buf));
+  const auto visit = [](const uint8_t* data, uint32_t len, void* ctx) {
+    static_cast<guest_slot::Scanner*>(ctx)->feed(data, len);
+  };
+  return slotHoldsAppImage(readVector, &slot, slotSize, chip, hasher, buf, sizeof(buf), scanner ? visit : nullptr,
+                           scanner);
 }
 
 }  // namespace
@@ -467,11 +490,12 @@ TEST(OtaSlotModel, AuthenticatedGuestImageNeedsProjectAndOneMarker) {
   uint8_t digest[32];
   sha.finish(digest);
   std::memcpy(image.data() + 304, digest, sizeof(digest));
-  ASSERT_TRUE(holds(image, 4096));
-  uint8_t buf[17];
-  const auto guest = inspectGuestImage(readVector, &image, image.size(), buf, sizeof(buf));
+  guest_slot::Scanner scanner;
+  ASSERT_TRUE(holds(image, 4096, kChipS3, &scanner));
+  const auto guest = guest_slot::inspectHeader(readVector, &image, image.size());
   EXPECT_TRUE(guest.installed);
   EXPECT_STREQ(guest.version, "1.2.3");
+  EXPECT_TRUE(scanner.exactlyOne());
   image[200] ^= 1;
   EXPECT_FALSE(holds(image, 4096));
 }
