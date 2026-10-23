@@ -101,6 +101,7 @@ class CrossPointWebServer {
   void handleGuestInstall();
   void handleGuestStart();
   void handleGuestState() const;
+  void handleForkUpdate();
 #endif
   void handleRemoteInput() const;
   void handleScreen() const;

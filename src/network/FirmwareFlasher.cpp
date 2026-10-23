@@ -195,6 +195,20 @@ Result validateImageFile(const char* sdPath, size_t partitionSize) {
   return Result::OK;
 }
 
+Result inspectImageFile(const char* sdPath, size_t* imageSize) {
+  const esp_partition_t* dest = esp_ota_get_next_update_partition(nullptr);
+  if (!dest) return Result::NO_PARTITION;
+
+  HalFile file;
+  if (!Storage.openFileForRead("FLASH", sdPath, file) || !file) return Result::OPEN_FAIL;
+  const size_t size = file.fileSize();
+  file.close();
+
+  const Result result = validateImageFile(sdPath, dest->size);
+  if (result == Result::OK && imageSize) *imageSize = size;
+  return result;
+}
+
 namespace {
 // SHA-256 of the first `size` bytes of `sdPath`, read in CHUNK pieces through `buf`.
 bool hashFile(const char* sdPath, size_t size, uint8_t* buf, uint8_t (&out)[SHA_TRAILER]) {

@@ -34,12 +34,14 @@
 
 #include "ClippingStore.h"
 #include "CrossPointSettings.h"
+#include "FirmwareFlasher.h"
 #include "FontInstaller.h"
 #include "GuestDevLoop.h"
 #include "GuestInstall.h"
 #include "GuestSlot.h"
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
+#include "OtaBootSwitch.h"
 #include "ProtectedPaths.h"
 #include "SdCardFontSystem.h"
 #include "SettingsList.h"
@@ -240,6 +242,57 @@ void CrossPointWebServer::handleGuestState() const {
   doc["devloop"] = Storage.exists(guest_devloop::kFlagPath);
   sendJson(doc);
 }
+
+void CrossPointWebServer::handleForkUpdate() {
+  if (!guestInstallStatus) {
+    server->send(409, "application/json", "{\"result\":\"OPEN_INSTALL_SCREEN\"}");
+    return;
+  }
+  if (wsUploadInProgress || upload.file || fontUpload.file) {
+    server->send(409, "application/json", "{\"result\":\"UPLOAD_BUSY\"}");
+    return;
+  }
+
+  const String path = server->arg("path");
+  if (path.length() < 6 || path.length() > 96 || path[0] != '/' || path.indexOf('/', 1) != -1 ||
+      !path.endsWith(".bin") || !FsHelpers::isSafePathComponent(path.substring(1))) {
+    server->send(409, "application/json", "{\"result\":\"INVALID_PATH\"}");
+    return;
+  }
+  const auto preflight = firmware_flash::inspectImageFile(path.c_str(), nullptr);
+  if (preflight != firmware_flash::Result::OK) {
+    char response[96];
+    snprintf(response, sizeof(response), "{\"result\":\"%s\"}", firmware_flash::resultName(preflight));
+    server->send(409, "application/json", response);
+    return;
+  }
+  if (ota_boot::confirmationPending()) {
+    server->send(409, "application/json", "{\"result\":\"CONFIRM_REQUIRED\"}");
+    return;
+  }
+  {
+    ota_boot::AppWriteGuard guard(esp_ota_get_next_update_partition(nullptr));
+    if (!guard) {
+      server->send(409, "application/json", "{\"result\":\"GUARD_REFUSED\"}");
+      return;
+    }
+  }
+
+  guestInstallStatus(true, "", guestInstallContext);
+  const auto result = firmware_flash::flashFromSdPath(path.c_str(), nullptr, nullptr);
+  char response[96];
+  snprintf(response, sizeof(response), "{\"result\":\"%s\"}", firmware_flash::resultName(result));
+  server->sendHeader("Connection", "close");
+  server->send(result == firmware_flash::Result::OK || result == firmware_flash::Result::OTADATA_UNKNOWN ? 200 : 500,
+               "application/json", response);
+  server->client().flush();
+  if (result == firmware_flash::Result::OK || result == firmware_flash::Result::OTADATA_UNKNOWN) {
+    delay(250);
+    ESP.restart();
+    return;
+  }
+  guestInstallStatus(false, firmware_flash::resultName(result), guestInstallContext);
+}
 #endif
 
 void CrossPointWebServer::handleRemoteInput() const {
@@ -387,6 +440,7 @@ void CrossPointWebServer::begin() {
   server->on("/api/readmaxer/install", HTTP_POST, [this] { handleGuestInstall(); });
   server->on("/api/readmaxer/start", HTTP_POST, [this] { handleGuestStart(); });
   server->on("/api/readmaxer/state", HTTP_GET, [this] { handleGuestState(); });
+  server->on("/api/readmaxer/update-fork", HTTP_POST, [this] { handleForkUpdate(); });
 #endif
 
   // Create folder endpoint

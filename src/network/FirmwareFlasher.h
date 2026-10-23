@@ -63,6 +63,10 @@ Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx);
 // success so the caller can immediately reread it for flashing.
 Result validateImageFile(const char* sdPath, size_t partitionSize);
 
+// Check the selected SD image and destination without changing flash.
+// Both the Settings activity and the remote update route use this preflight.
+Result inspectImageFile(const char* sdPath, size_t* imageSize);
+
 const char* resultName(Result r);
 
 // Returns the chip_id (esp_image_header_t offset 12) of the currently-running

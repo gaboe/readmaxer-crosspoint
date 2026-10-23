@@ -1,7 +1,7 @@
 # Control the READMAXER guest over Wi-Fi
 
 Known POC limit: the web server has no authentication. Any client on the joined
-Wi-Fi can install or start the guest, send input, and read the screen. Use a
+Wi-Fi can install or start the guest, update CrossPoint, send input, and read the screen. Use a
 trusted network.
 
 1. Save the reader's Wi-Fi network in Settings.
@@ -24,6 +24,7 @@ cargo run --locked --manifest-path tools/install-guest/Cargo.toml -- start
 cargo run --locked --manifest-path tools/install-guest/Cargo.toml -- fetch-diag ./reader-diag
 cargo run --locked --manifest-path tools/install-guest/Cargo.toml -- input back
 cargo run --locked --manifest-path tools/install-guest/Cargo.toml -- screen ./screen.pbm
+cargo run --locked --manifest-path tools/install-guest/Cargo.toml -- update-fork ./readmaxer-fork.bin
 cargo run --locked --manifest-path tools/install-guest/Cargo.toml -- wait 60
 ```
 
@@ -32,6 +33,15 @@ polls `/api/status` until the reader answers or the timeout expires. The
 default timeout is 60 seconds. `fetch-diag` downloads `diag.txt` and
 `diag-last.txt` from `/readmaxer`; a missing file is reported and skipped.
 `screen` writes a binary PBM image in physical panel orientation.
+`update-fork` uploads a snapshot of the image to the SD root and calls
+`POST /api/readmaxer/update-fork?path=/<file>.bin`. The route works only while
+the Install READMAXER screen is open. It uses the Settings SD firmware update
+checks, guarded write, readback, and boot selection. A complete HTTP 409
+response means that the route refused the image before a flash write. A lost
+response or an HTTP 500 result leaves the update unconfirmed. After `OK`, the
+tool waits for a new boot and prints the version from `/api/status`. Check the
+reader before another attempt if the result is unconfirmed. The uploaded file
+stays on the SD root until you remove it.
 
 To enter the install screen after every normal boot, upload an empty
 `/readmaxer/devloop` file while a web server screen is open:

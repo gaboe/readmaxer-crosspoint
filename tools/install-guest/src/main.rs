@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -237,18 +237,76 @@ fn wait(host: &str, timeout: Duration) -> Result<String> {
     }
 }
 
-fn upload(host: &str, path: &Path, name: &str) -> Result<()> {
+fn upload_to(host: &str, path: &Path, name: &str, directory: &str) -> Result<()> {
     let path = path.to_str().ok_or("Image path must be valid UTF-8")?;
     let quoted = path.replace('\\', "\\\\").replace('"', "\\\"");
     request(
         host,
-        "/upload?path=/readmaxer",
+        &format!("/upload?path={directory}"),
         &[
             "--form".into(),
             format!("file=@\"{quoted}\";filename={name}"),
         ],
     )?;
     Ok(())
+}
+
+fn upload(host: &str, path: &Path, name: &str) -> Result<()> {
+    upload_to(host, path, name, "/readmaxer")
+}
+
+fn wait_for_restart(host: &str, previous_uptime: u64, previous_version: &str) -> Result<String> {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut went_offline = false;
+    loop {
+        match exchange(
+            host,
+            "/api/status",
+            &[
+                "--connect-timeout".into(),
+                "2".into(),
+                "--max-time".into(),
+                "2".into(),
+            ],
+        ) {
+            Ok(response) if response.status == 200 => {
+                if let Ok(status) = serde_json::from_str::<Value>(&response.body) {
+                    if let (Some(version), Some(uptime)) =
+                        (status["version"].as_str(), status["uptime"].as_u64())
+                    {
+                        if went_offline || uptime < previous_uptime || version != previous_version {
+                            return Ok(format!("CrossPoint version: {version}"));
+                        }
+                    }
+                }
+            }
+            _ => went_offline = true,
+        }
+        if Instant::now() >= deadline {
+            return Err("Update is unconfirmed. Reader did not return after restart".into());
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn update_fork(host: &str, image: &Path) -> Result<String> {
+    let before: Value = serde_json::from_str(&request(host, "/api/status", &[])?)?;
+    let previous_version = before["version"].as_str().ok_or("Missing reader version")?;
+    let previous_uptime = before["uptime"].as_u64().ok_or("Missing reader uptime")?;
+    let staging = Staging::create()?;
+    let snapshot = staging.0.join("fork.bin");
+    fs::copy(image, &snapshot)?;
+    File::open(&snapshot)?.sync_all()?;
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let name = format!("readmaxer-fork-{}-{nonce}.bin", std::process::id());
+    upload_to(host, &snapshot, &name, "/")?;
+    command_result(
+        host,
+        &format!("/api/readmaxer/update-fork?path=/{name}"),
+        "Fork update",
+        &["--request".into(), "POST".into()],
+    )?;
+    wait_for_restart(host, previous_uptime, previous_version)
 }
 
 fn unconfirmed(host: &str, detail: &str) -> Box<dyn Error> {
@@ -336,6 +394,7 @@ fn main() {
             Some("fetch-diag") if args.len() == 2 => fetch_diag(&host, Path::new(&args[1])),
             Some("input") if args.len() == 2 => input(&host, args[1].to_str().ok_or("Invalid button")?),
             Some("screen") if args.len() == 2 => screen(&host, Path::new(&args[1])),
+            Some("update-fork") if args.len() == 2 => update_fork(&host, Path::new(&args[1])),
             Some("wait") if args.len() <= 2 => {
                 let seconds = if let Some(value) = args.get(1) {
                     value.to_str().ok_or("Invalid timeout")?.parse::<u64>()?
@@ -344,7 +403,7 @@ fn main() {
                 };
                 wait(&host, Duration::from_secs(seconds))
             }
-            _ => Err("Usage: install-guest install IMAGE.bin | start | state | fetch-diag DIR | wait [SECONDS] | input BUTTON | screen OUT.pbm".into()),
+            _ => Err("Usage: install-guest install IMAGE.bin | update-fork IMAGE.bin | start | state | fetch-diag DIR | wait [SECONDS] | input BUTTON | screen OUT.pbm".into()),
         }
     })();
     match result {
@@ -625,5 +684,45 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("OPEN_INSTALL_SCREEN"));
+    }
+
+    #[test]
+    fn fork_update_uploads_to_root_and_waits_for_new_boot() {
+        let staging = Staging::create().unwrap();
+        let image = staging.0.join("fork.bin");
+        fs::write(&image, b"fork fixture").unwrap();
+        let (result, requests) = serve(
+            vec![
+                (200, br#"{"version":"old","uptime":42}"#.to_vec()),
+                (200, b"uploaded".to_vec()),
+                (200, br#"{"result":"OK"}"#.to_vec()),
+                (503, b"restarting".to_vec()),
+                (200, br#"{"version":"new","uptime":1}"#.to_vec()),
+            ],
+            |host| update_fork(host, &image),
+        );
+        assert_eq!(result.unwrap(), "CrossPoint version: new");
+        assert!(requests[1].starts_with("POST /upload?path=/ "));
+        assert!(requests[1].contains("fork fixture"));
+        assert!(requests[2].starts_with("POST /api/readmaxer/update-fork?path=/readmaxer-fork-"));
+        assert!(requests[3].starts_with("GET /api/status "));
+        assert!(requests[4].starts_with("GET /api/status "));
+    }
+
+    #[test]
+    fn fork_update_refusal_does_not_wait_for_restart() {
+        let staging = Staging::create().unwrap();
+        let image = staging.0.join("fork.bin");
+        fs::write(&image, b"fork fixture").unwrap();
+        let (result, requests) = serve(
+            vec![
+                (200, br#"{"version":"old","uptime":42}"#.to_vec()),
+                (200, b"uploaded".to_vec()),
+                (409, br#"{"result":"WRONG_FORK"}"#.to_vec()),
+            ],
+            |host| update_fork(host, &image),
+        );
+        assert!(result.unwrap_err().to_string().contains("WRONG_FORK"));
+        assert_eq!(requests.len(), 3);
     }
 }

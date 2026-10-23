@@ -12,3 +12,6 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME Cp2HomeAndGuestBehavior
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/Cp2BehaviorTest.py
           ${REPO_ROOT} ${CMAKE_CXX_COMPILER})
+add_test(NAME RemoteForkUpdateRefusals
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/RemoteForkUpdateTest.py
+          ${REPO_ROOT} ${CMAKE_CXX_COMPILER})
