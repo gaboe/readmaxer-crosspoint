@@ -83,25 +83,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Short board-specific names keep pull-request artifacts easy to identify.
-        # The release workflow applies the published crosspoint-<version>-<device>.bin names.
+        # This fork is the READMAXER host on the X4 Pro only. Its one artifact is
+        # the x4pro app image; merged images (firmware.factory.bin) are never published.
         include:
-          - env: default
-            asset: firmware.bin
-          - env: sticky
-            asset: firmware-sticky.bin
           - env: x4pro
-            asset: firmware-x4pro.bin
-          - env: x4c
-            asset: firmware-x4c.bin
-          - env: papermono
-            asset: firmware-papermono.bin
-          - env: metalio_eink4
-            asset: firmware-metalio_eink4.bin
-          - env: eego_a4
-            asset: firmware-eego_a4.bin
-          - env: picco
-            asset: firmware-picco.bin
+            asset: firmware.bin
     steps:
       - uses: actions/checkout@v6
         with:
@@ -167,6 +153,9 @@ jobs:
             if [ -n "$ram_line" ]; then echo "- ${ram_line}"; else echo "- RAM: not found"; fi
             if [ -n "$flash_line" ]; then echo "- ${flash_line}"; else echo "- Flash: not found"; fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check slot image
+        run: python3 scripts/check_slot_image.py --board x4pro .pio/build/${{ matrix.env }}/firmware.bin
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v6

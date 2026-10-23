@@ -15,7 +15,7 @@ The old bridge helpers (`rowTouch`, `colTouch`, manual rect `contains()` checks)
 | A single list of rows | subclass `UiListActivity` | [`LanguageSelectActivity`](../../src/activities/settings/LanguageSelectActivity.cpp) (minimal), [`FileBrowserActivity`](../../src/activities/home/FileBrowserActivity.cpp) (long-press and lazy rows) |
 | Tabbed lists | subclass `UiTabListActivity` | [`SettingsActivity`](../../src/activities/settings/SettingsActivity.cpp) |
 | Custom FUI layout (sliders, prompts, state machines) | inherit `UiAppHost` directly | [`EpubReaderPercentSelectionActivity`](../../src/activities/reader/EpubReaderPercentSelectionActivity.cpp), [`WifiSelectionActivity`](../../src/activities/network/WifiSelectionActivity.cpp) |
-| A modal picker or confirm inside a legacy activity | `OptionPopup` (or push `ConfirmationActivity`) | [`OtaUpdateActivity`](../../src/activities/settings/OtaUpdateActivity.cpp) |
+| A modal picker or confirm inside a legacy activity | `OptionPopup` (or push `ConfirmationActivity`) | [`ClearCacheActivity`](../../src/activities/settings/ClearCacheActivity.cpp) |
 | A Yes/No prompt inside a FUI screen | build `fui::optionDialog` into the screen | `WifiSelectionActivity::buildPromptDialog` |
 
 All of these paths route input through the same SDK interaction table, so touch and physical buttons fire the same actions with no per-screen coordinate code.
@@ -143,7 +143,8 @@ As with all input: never call the SDK `InputManager` or read GPIO directly. The 
 ## Building and testing on other devices
 
 Select a checked-in environment from `platformio.ini` before creating a local
-profile. CrossPoint's CI and release workflows currently cover:
+profile. This fork's CI and release workflows build only `x4pro`, the READMAXER
+host. `platformio.ini` also provides these environments:
 
 | Device | Development environment | MCU |
 | --- | --- | --- |
@@ -157,7 +158,7 @@ profile. CrossPoint's CI and release workflows currently cover:
 
 Build with `pio run -e <environment>`. X3 and X4 share a binary with runtime
 board selection; different MCU families require separate binaries. Check the
-current workflow matrices before claiming build coverage or published assets.
+current workflows before claiming build coverage or published assets.
 
 The [FreeInk SDK profiles](../../freeink-sdk/libs/hardware/BoardConfig/include/BoardConfig.h)
 cover additional hardware. An SDK profile does not by itself establish

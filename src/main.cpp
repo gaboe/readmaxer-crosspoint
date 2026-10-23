@@ -45,6 +45,7 @@
 #include "activities/settings/SdFirmwareUpdateActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "network/OtaBootSwitch.h"
 #include "platform/UsbSerialJtagHandoff.h"
 #include "util/ButtonNavigator.h"
 #include "util/PluginEvents.h"
@@ -456,6 +457,15 @@ static bool holdSleepWhileUsbPowered() {
 }
 #endif
 
+// Every deliberate deep sleep goes through here, so a sleep before Home never
+// leaves the boot fallback armed.
+static void sleepNow(const bool wakeOnHeldButton = false) {
+  Storage.prepareForDeepSleep();
+  ota_boot::keepRunningSlot();
+  LOG_DBG("MAIN", "Entering deep sleep");
+  powerManager.startDeepSleep(gpio, wakeOnHeldButton);
+}
+
 // Enter deep sleep mode
 void enterDeepSleep(bool fromTimeout = false) {
   HalPowerManager::Lock powerLock;  // Ensure we are at normal CPU frequency for sleep preparation
@@ -508,10 +518,7 @@ void enterDeepSleep(bool fromTimeout = false) {
 
   halTiltSensor.deepSleep();
   display.deepSleep();
-  Storage.prepareForDeepSleep();
-  LOG_DBG("MAIN", "Entering deep sleep");
-
-  powerManager.startDeepSleep(gpio, wakeOnHeldButton);
+  sleepNow(wakeOnHeldButton);
 }
 
 void setupDisplayAndFonts(bool seamless = false) {
@@ -557,6 +564,7 @@ void setupDisplayAndFonts(bool seamless = false) {
 
 void setup() {
   BoardConfig::holdPowerRails();
+  ota_boot::armBootFallback();
 
 #ifdef ENABLE_SERIAL_LOG
 #ifdef CROSSPOINT_WAIT_FOR_USB_SERIAL
@@ -629,6 +637,7 @@ void setup() {
   // We need 6 open files concurrently when parsing a new chapter
   if (!Storage.begin()) {
     LOG_ERR("MAIN", "SD card initialization failed");
+    ota_boot::keepRunningSlot();
     setupDisplayAndFonts(isSilentReboot);
     activityManager.goToFullScreenMessage("SD card error", EpdFontFamily::BOLD);
     return;
@@ -698,8 +707,7 @@ void setup() {
       if (!wakeHoldVerified && SETTINGS.shortPwrBtn != CrossPointSettings::SHORT_PWRBTN::SLEEP &&
           !(FREEINK_DEVICE_PICCO && gpio.isUsbConnected())) {
         LOG_DBG("MAIN", "Power-button wake not held through verification, sleeping");
-        Storage.prepareForDeepSleep();
-        powerManager.startDeepSleep(gpio);
+        sleepNow();
       }
       wakePowerReleasePending = true;
       break;
@@ -717,8 +725,7 @@ void setup() {
       // the device in a USB-replug boot loop (or sleep right after a flash).
       break;
 #else
-      Storage.prepareForDeepSleep();
-      powerManager.startDeepSleep(gpio);
+      sleepNow();
       break;
 #endif
     case HalGPIO::WakeupReason::AfterFlash:
@@ -782,6 +789,9 @@ void setup() {
   } else if (rebootedFromPanic) {
     // If we rebooted from a panic, go to crash report screen to show the panic info
     activityManager.goToCrashReport();
+  } else if (ota_boot::confirmationPending()) {
+    // This slot waits for Home to confirm it, so no resume target skips Home.
+    activityManager.goHome(HomeMenuItem::NONE, needsWakeRefresh);
   } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_READER &&
              !APP_STATE.openEpubPath.empty()) {
     activityManager.goToReader(APP_STATE.openEpubPath);

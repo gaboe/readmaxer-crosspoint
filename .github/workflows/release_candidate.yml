@@ -5,27 +5,8 @@ on:
 
 jobs:
   build-release-candidate:
+    # x4pro only, built with the same flags as the CI build; the app image is the one artifact.
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - pio_env: gh_release_rc
-            asset: firmware.bin
-          - pio_env: sticky-gh_release_rc
-            asset: firmware-sticky.bin
-          - pio_env: x4pro-gh_release_rc
-            asset: firmware-x4pro.bin
-          - pio_env: x4c-gh_release_rc
-            asset: firmware-x4c.bin
-          - pio_env: papermono-gh_release_rc
-            asset: firmware-papermono.bin
-          - pio_env: metalio_eink4-gh_release_rc
-            asset: firmware-metalio_eink4.bin
-          - pio_env: eego_a4-gh_release_rc
-            asset: firmware-eego_a4.bin
-          - pio_env: picco-gh_release_rc
-            asset: firmware-picco.bin
     steps:
       - uses: actions/checkout@v6
         with:
@@ -65,34 +46,19 @@ jobs:
           # Envs with custom_sdkconfig run a nested `pio run` from
           # ~/.platformio/penv. Keep that core on the same version as the outer core.
           # See https://github.com/pioarduino/platform-espressif32/issues/529
-          pio pkg install -e ${{ matrix.pio_env }}
+          pio pkg install -e x4pro
           uv pip install --python ~/.platformio/penv/bin/python "pioarduino==6.1.19"
           ~/.platformio/penv/bin/pio --version
 
-      - name: Extract env
-        run: |
-          echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_ENV
-          echo "BRANCH_SUFFIX=${GITHUB_REF_NAME#release/}" >> $GITHUB_ENV
+      - name: Build x4pro firmware
+        run: pio run -e x4pro -j1
 
-      - name: Build CrossPoint Release Candidate
-        env:
-          CROSSPOINT_RC_HASH: ${{ env.SHORT_SHA }}
-        run: pio run -e ${{ matrix.pio_env }} -j1
-
-      - name: Name release asset
-        run: |
-          if [ "${{ matrix.asset }}" != "firmware.bin" ]; then
-            cp ".pio/build/${{ matrix.pio_env }}/firmware.bin" \
-              ".pio/build/${{ matrix.pio_env }}/${{ matrix.asset }}"
-          fi
+      - name: Check slot image
+        run: python3 scripts/check_slot_image.py --board x4pro .pio/build/x4pro/firmware.bin
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: CrossPoint-RC-${{ env.BRANCH_SUFFIX }}-${{ matrix.pio_env }}
-          path: |
-            .pio/build/${{ matrix.pio_env }}/bootloader.bin
-            .pio/build/${{ matrix.pio_env }}/${{ matrix.asset }}
-            .pio/build/${{ matrix.pio_env }}/firmware.elf
-            .pio/build/${{ matrix.pio_env }}/firmware.map
-            .pio/build/${{ matrix.pio_env }}/partitions.bin
+          name: firmware.bin
+          path: .pio/build/x4pro/firmware.bin
+          if-no-files-found: error

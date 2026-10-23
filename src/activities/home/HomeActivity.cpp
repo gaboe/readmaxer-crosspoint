@@ -25,6 +25,7 @@
 #include "RecentBooksStore.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "network/OtaBootSwitch.h"
 
 int HomeActivity::getMenuItemCount() const {
   int count = 4;  // File Browser, Library, File transfer, Settings
@@ -482,6 +483,7 @@ void HomeActivity::render(RenderLock&&) {
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
     renderer.displayBuffer(cleanInitialRefresh && !firstRenderDone ? HalDisplay::HALF_REFRESH
                                                                    : HalDisplay::FAST_REFRESH);
+    ota_boot::confirmRunningSlot();
     // Slot heights are recorded during the draw above; a change (first layout
     // pass, orientation switch) means the paths must point at those sizes and
     // any missing thumbs must be generated. Refreshing the paths right away
@@ -554,6 +556,7 @@ void HomeActivity::render(RenderLock&&) {
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   renderer.displayBuffer(cleanInitialRefresh && !firstRenderDone ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);
+  ota_boot::confirmRunningSlot();
 
   if (!firstRenderDone) {
     firstRenderDone = true;
