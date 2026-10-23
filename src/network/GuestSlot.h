@@ -12,10 +12,12 @@ struct Inspection {
   const esp_partition_t* partition = nullptr;
 };
 
+enum class SwitchResult { NoGuest, GuardRefused, SelectionFailed, Selected, Unknown };
+
 Inspection inspect();
 Inspection inspectFresh();
 bool switchAllowed();
-ota_boot::SelectionResult switchGuest();
+SwitchResult switchGuest();
 bool bootableNonGuest(const esp_partition_t* partition);
 bool checkAndCache(const esp_partition_t* other);
 void invalidateCache();

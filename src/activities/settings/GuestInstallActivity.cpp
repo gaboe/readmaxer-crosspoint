@@ -97,6 +97,7 @@ void GuestInstallActivity::loop() {
           fail(StrId::STR_MEMORY_ERROR);
           return;
         }
+        server->setRemoteInput(mappedInput);
         server->enableGuestInstall(installStatus, this);
         server->setUploadCancelCheck([this] {
           mappedInput.update(true);
@@ -131,6 +132,7 @@ void GuestInstallActivity::loop() {
         return;
       }
       server->handleClient();
+      if (mappedInput.wasPressed(MappedInputManager::Button::Back)) finish();
       break;
     case State::Installing:
     case State::Failed:

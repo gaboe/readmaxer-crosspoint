@@ -338,11 +338,13 @@ void HomeActivity::loop() {
       default:
         if (guest.image.installed && menuIndex == 4 + static_cast<int>(hasLibrarySlot())) {
           switch (guest_slot::switchGuest()) {
-            case ota_boot::SelectionResult::Selected:
-            case ota_boot::SelectionResult::Unknown:
+            case guest_slot::SwitchResult::Selected:
+            case guest_slot::SwitchResult::Unknown:
               silentRestart();
               break;
-            case ota_boot::SelectionResult::Failed:
+            case guest_slot::SwitchResult::NoGuest:
+            case guest_slot::SwitchResult::GuardRefused:
+            case guest_slot::SwitchResult::SelectionFailed:
               GUI.drawPopup(renderer, tr(STR_UPDATE_FAILED));
               break;
           }

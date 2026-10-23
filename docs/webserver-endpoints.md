@@ -141,6 +141,62 @@ Notes:
   don't mark it.
 - HTTP upload uses a 4 KB write buffer before flushing to the SD card.
 
+### READMAXER development loop
+
+On X4 Pro, the file `/readmaxer/devloop` makes the fork open **Install READMAXER**
+after a normal boot. The screen joins saved Wi-Fi and starts the web server.
+Back leaves the screen. Recovery, crash reporting, and first-boot slot
+confirmation still take priority. Without the file, boot routing is unchanged.
+
+Create the empty flag while a web server screen is open:
+
+```sh
+touch devloop
+curl --noproxy '*' -F 'file=@devloop;filename=devloop' 'http://READER_HOST/upload?path=/readmaxer'
+```
+
+Remove the flag through `POST /delete`:
+
+```sh
+curl --noproxy '*' -d 'path=/readmaxer/devloop' 'http://READER_HOST/delete'
+```
+
+Replace `READER_HOST` with the hostname or IP shown on the reader. The flag
+is read at boot. These endpoints have no authentication. Use a trusted network.
+
+### `GET /api/readmaxer/state`
+
+X4 Pro only. The endpoint is enabled while **Install READMAXER** is open.
+It reports the running app slot, whether a guest is installed, its version,
+and whether `/readmaxer/devloop` exists:
+
+```json
+{"running_slot":"ota_0","guest_installed":true,"guest_version":"1.2.3","devloop":true}
+```
+
+`running_slot` is `ota_0`, `ota_1`, or `unknown`. `guest_version` is empty when
+no guest is installed. Outside the install screen, the endpoint returns HTTP
+403 with `OPEN_INSTALL_SCREEN`.
+
+### `POST /api/readmaxer/start`
+
+X4 Pro only. The endpoint is enabled while **Install READMAXER** is open.
+The request has no body. It uses the Home READMAXER item's guarded switch to
+the installed guest, sends JSON, then restarts. `OK` means the selection was
+read back. It does not prove that the guest started.
+
+```json
+{"result":"OK"}
+```
+
+If no guest is installed, HTTP 409 reports `NO_GUEST`. A switch guard refusal
+reports `GUARD_REFUSED`. Neither case writes otadata. A failed selection
+reports HTTP 409 with `SELECTION_FAILED`; otadata may have changed. An active
+upload returns HTTP 409 with `UPLOAD_BUSY`. `SELECTION_UNKNOWN` means the
+selection readback failed. The reader restarts, but the boot result is
+unconfirmed. Inspect the reader after either selection error. Outside the
+install screen, HTTP 403 reports `OPEN_INSTALL_SCREEN`.
+
 ### `POST /api/readmaxer/install`
 
 X4 Pro only. The endpoint is enabled while **Settings > General > Install READMAXER** is open.
@@ -185,6 +241,25 @@ Selection failure or unknown readback after an otadata erase also keeps that VAL
 fork entry through CP2's guarded plan. The other otadata sector may have changed.
 The install screen stays open for an error or another upload. Back closes the server and Wi-Fi.
 There is no handoff-sector write or USB fallback.
+
+### `POST /api/input`
+
+Send form data `button=confirm`, `button=back`, `button=next`, or
+`button=previous` while the web server runs. The endpoint injects one click
+through the shared remote-button input path. HTTP 200 reports `OK`. HTTP 409
+reports `CLICK_PENDING` if a click is already queued, or `INPUT_BUSY` if a
+physical input blocks injection. An unknown button returns HTTP 400 with
+`INVALID_BUTTON`. A server activity consumes the click before the next input
+frame resets it. Input has no authentication. Use a trusted network.
+
+### `GET /api/screen`
+
+While the web server runs, this endpoint streams the current 1-bit framebuffer
+as a binary PBM file (`P4`). The header gives the physical panel width and
+height. The server streams panel rows directly from the existing framebuffer
+and holds the render lock while it sends the frame. The image may omit display
+effects that are outside the framebuffer.
+Screen capture has no authentication. Use a trusted network.
 
 ### `POST /mkdir`
 

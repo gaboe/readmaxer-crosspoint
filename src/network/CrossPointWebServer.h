@@ -11,6 +11,8 @@
 #include <string>
 #include <vector>
 
+class MappedInputManager;
+
 // Structure to hold file information
 struct FileInfo {
   String name;
@@ -68,6 +70,7 @@ class CrossPointWebServer {
   // An HTTP upload holds handleClient() until its body is read, so this is polled on each chunk.
   // Returning true drops the client: the upload aborts and its partial file is removed.
   void setUploadCancelCheck(std::function<bool()> check) { uploadCancelCheck = std::move(check); }
+  void setRemoteInput(MappedInputManager& input) { remoteInput = &input; }
 
 #if FREEINK_DEVICE_X4PRO
   using GuestInstallStatus = void (*)(bool installing, const char* result, void* ctx);
@@ -90,12 +93,17 @@ class CrossPointWebServer {
   NetworkUDP udp;
   bool udpActive = false;
   std::function<bool()> uploadCancelCheck;
+  MappedInputManager* remoteInput = nullptr;
   bool dropUploadIfCancelled() const;
 #if FREEINK_DEVICE_X4PRO
   GuestInstallStatus guestInstallStatus = nullptr;
   void* guestInstallContext = nullptr;
   void handleGuestInstall();
+  void handleGuestStart();
+  void handleGuestState() const;
 #endif
+  void handleRemoteInput() const;
+  void handleScreen() const;
 
   // WebSocket upload state
   void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length);

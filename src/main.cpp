@@ -42,6 +42,10 @@
 #include "WifiCredentialStore.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#if FREEINK_DEVICE_X4PRO
+#include "activities/settings/GuestInstallActivity.h"
+#include "network/GuestDevLoop.h"
+#endif
 #include "activities/settings/SdFirmwareUpdateActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -803,6 +807,11 @@ void setup() {
   } else if (ota_boot::confirmationPending()) {
     // This slot waits for Home to confirm it, so no resume target skips Home.
     activityManager.goHome(HomeMenuItem::NONE, needsWakeRefresh);
+#if FREEINK_DEVICE_X4PRO
+  } else if (guest_devloop::shouldOpen(Storage.exists(guest_devloop::kFlagPath), recoveryFirmwareMode,
+                                       rebootedFromPanic, ota_boot::confirmationPending())) {
+    activityManager.replaceActivity(std::make_unique<GuestInstallActivity>(renderer, mappedInputManager));
+#endif
   } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_READER &&
              !APP_STATE.openEpubPath.empty()) {
     activityManager.goToReader(APP_STATE.openEpubPath);

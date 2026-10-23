@@ -21,6 +21,7 @@
 #include <base64.h>
 #include <esp_efuse.h>
 #include <esp_efuse_table.h>
+#include <esp_ota_ops.h>
 #include <wolfssl/wolfcrypt/aes.h>
 #include <wolfssl/wolfcrypt/hash.h>
 
@@ -34,14 +35,19 @@
 #include "ClippingStore.h"
 #include "CrossPointSettings.h"
 #include "FontInstaller.h"
+#include "GuestDevLoop.h"
 #include "GuestInstall.h"
+#include "GuestSlot.h"
+#include "MappedInputManager.h"
 #include "OpdsServerStore.h"
 #include "ProtectedPaths.h"
 #include "SdCardFontSystem.h"
 #include "SettingsList.h"
+#include "SilentRestart.h"
 #include "WebDAVHandler.h"
 #include "WifiCredentialStore.h"
 #include "WifiPowerSaveGuard.h"
+#include "activities/RenderLock.h"
 #include "html/FilesPageHtml.generated.h"
 #include "html/FontsPageHtml.generated.h"
 #include "html/HomePageHtml.generated.h"
@@ -183,7 +189,129 @@ void CrossPointWebServer::handleGuestInstall() {
   }
   guestInstallStatus(false, name, guestInstallContext);
 }
+
+void CrossPointWebServer::handleGuestStart() {
+  if (!guestInstallStatus) {
+    server->send(403, "application/json", "{\"result\":\"OPEN_INSTALL_SCREEN\"}");
+    return;
+  }
+  if (wsUploadInProgress || upload.file || fontUpload.file) {
+    server->send(409, "application/json", "{\"result\":\"UPLOAD_BUSY\"}");
+    return;
+  }
+  const auto result = guest_slot::switchGuest();
+  switch (result) {
+    case guest_slot::SwitchResult::NoGuest:
+      server->send(409, "application/json", "{\"result\":\"NO_GUEST\"}");
+      return;
+    case guest_slot::SwitchResult::GuardRefused:
+      server->send(409, "application/json", "{\"result\":\"GUARD_REFUSED\"}");
+      return;
+    case guest_slot::SwitchResult::SelectionFailed:
+      server->send(409, "application/json", "{\"result\":\"SELECTION_FAILED\"}");
+      return;
+    case guest_slot::SwitchResult::Selected:
+    case guest_slot::SwitchResult::Unknown:
+      break;
+  }
+  server->sendHeader("Connection", "close");
+  server->send(
+      200, "application/json",
+      result == guest_slot::SwitchResult::Selected ? "{\"result\":\"OK\"}" : "{\"result\":\"SELECTION_UNKNOWN\"}");
+  server->client().flush();
+  delay(250);
+  silentRestart();
+}
+
+void CrossPointWebServer::handleGuestState() const {
+  if (!guestInstallStatus) {
+    server->send(403, "application/json", "{\"result\":\"OPEN_INSTALL_SCREEN\"}");
+    return;
+  }
+  const auto* running = esp_ota_get_running_partition();
+  const auto guest = guest_slot::inspect();
+  JsonDocument doc;
+  doc["running_slot"] = !running                                              ? "unknown"
+                        : running->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_0 ? "ota_0"
+                        : running->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_1 ? "ota_1"
+                                                                              : "unknown";
+  doc["guest_installed"] = guest.image.installed;
+  doc["guest_version"] = guest.image.installed ? guest.image.version : "";
+  doc["devloop"] = Storage.exists(guest_devloop::kFlagPath);
+  sendJson(doc);
+}
 #endif
+
+void CrossPointWebServer::handleRemoteInput() const {
+  if (!remoteInput) {
+    server->send(503, "application/json", "{\"result\":\"INPUT_UNAVAILABLE\"}");
+    return;
+  }
+  const String name = server->arg("button");
+  RemoteButton button = RemoteButton::None;
+  if (name == "confirm") button = RemoteButton::Confirm;
+  if (name == "back") button = RemoteButton::Back;
+  if (name == "next") button = RemoteButton::Next;
+  if (name == "previous") button = RemoteButton::Previous;
+  if (button == RemoteButton::None) {
+    server->send(400, "application/json", "{\"result\":\"INVALID_BUTTON\"}");
+    return;
+  }
+  if (remoteInput->hasRemoteClick()) {
+    server->send(409, "application/json", "{\"result\":\"CLICK_PENDING\"}");
+    return;
+  }
+  if (!remoteInput->injectRemoteClick(button)) {
+    server->send(409, "application/json", "{\"result\":\"INPUT_BUSY\"}");
+    return;
+  }
+  server->send(200, "application/json", "{\"result\":\"OK\"}");
+}
+
+void CrossPointWebServer::handleScreen() const {
+  if (!remoteInput) {
+    server->send(503, "text/plain", "Screen unavailable");
+    return;
+  }
+  RenderLock lock;
+  const auto& renderer = remoteInput->getRenderer();
+  const int width = renderer.getDisplayWidth();
+  const int height = renderer.getDisplayHeight();
+  const size_t stride = renderer.getDisplayWidthBytes();
+  const uint8_t* frame = renderer.getFrameBuffer();
+  if (!frame || width <= 0 || height <= 0) {
+    server->send(503, "text/plain", "Screen unavailable");
+    return;
+  }
+  const size_t rowBytes = (static_cast<size_t>(width) + 7) / 8;
+  if (rowBytes > stride || stride * height > renderer.getBufferSize()) {
+    server->send(503, "text/plain", "Screen unavailable");
+    return;
+  }
+  char header[32];
+  const int headerLength = snprintf(header, sizeof(header), "P4\n%d %d\n", width, height);
+  if (headerLength <= 0 || static_cast<size_t>(headerLength) >= sizeof(header)) {
+    server->send(503, "text/plain", "Screen unavailable");
+    return;
+  }
+  server->setContentLength(static_cast<size_t>(headerLength) + rowBytes * height);
+  server->send(200, "image/x-portable-bitmap", "");
+  auto client = server->client();
+  const auto writeBytes = [&client](const uint8_t* data, size_t length) {
+    size_t sent = 0;
+    while (sent < length) {
+      resetTaskWatchdogIfSubscribed();
+      const size_t count = client.write(data + sent, length - sent);
+      if (count == 0) return false;
+      sent += count;
+    }
+    return true;
+  };
+  if (!writeBytes(reinterpret_cast<const uint8_t*>(header), headerLength)) return;
+  for (int y = 0; y < height; ++y) {
+    if (!writeBytes(frame + static_cast<size_t>(y) * stride, rowBytes)) return;
+  }
+}
 
 void CrossPointWebServer::begin() {
   if (running) {
@@ -248,6 +376,8 @@ void CrossPointWebServer::begin() {
   });
 
   server->on("/api/status", HTTP_GET, [this] { handleStatus(); });
+  server->on("/api/input", HTTP_POST, [this] { handleRemoteInput(); });
+  server->on("/api/screen", HTTP_GET, [this] { handleScreen(); });
   server->on("/api/files", HTTP_GET, [this] { handleFileListData(); });
   server->on("/download", HTTP_GET, [this] { handleDownload(); });
 
@@ -255,6 +385,8 @@ void CrossPointWebServer::begin() {
   server->on("/upload", HTTP_POST, [this] { handleUploadPost(upload); }, [this] { handleUpload(upload); });
 #if FREEINK_DEVICE_X4PRO
   server->on("/api/readmaxer/install", HTTP_POST, [this] { handleGuestInstall(); });
+  server->on("/api/readmaxer/start", HTTP_POST, [this] { handleGuestStart(); });
+  server->on("/api/readmaxer/state", HTTP_GET, [this] { handleGuestState(); });
 #endif
 
   // Create folder endpoint

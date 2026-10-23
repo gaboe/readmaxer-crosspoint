@@ -301,6 +301,7 @@ void CrossPointWebServerActivity::startWebServer() {
 
   // Create the web server instance
   webServer.reset(new CrossPointWebServer());
+  webServer->setRemoteInput(mappedInput);
   // An upload holds loop() inside handleClient(), so input is sampled on each received chunk instead. On a slow
   // link chunks come ~0.5 s apart, so a button found down gets a second sample past the SDK's 5 ms debounce.
   webServer->setUploadCancelCheck([this] {
@@ -408,6 +409,7 @@ void CrossPointWebServerActivity::loop() {
       constexpr int MAX_ITERATIONS = 500;
       for (int i = 0; i < MAX_ITERATIONS && webServer->isRunning(); i++) {
         webServer->handleClient();
+        if (mappedInput.hasRemoteClick()) break;
         if (leaveRequested) {
           onGoHome();
           return;

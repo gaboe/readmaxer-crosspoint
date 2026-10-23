@@ -27,7 +27,7 @@ second = home.index(marker, first + len(marker))
 grid_refresh = block(home, first)
 list_refresh = block(home, second)
 functions = "\n".join(block(guest, guest.index(signature)) for signature in [
-    "Inspection inspectFresh()", "Inspection inspect()", "bool switchAllowed()", "ota_boot::SelectionResult switchGuest()",
+    "Inspection inspectFresh()", "Inspection inspect()", "bool switchAllowed()", "SwitchResult switchGuest()",
     "bool checkAndCache(", "void invalidateCache()",
 ])
 # The rendering host must retain the guest label and paint a separate icon.
@@ -57,16 +57,17 @@ program = r"""
 struct esp_partition_t {};
 esp_partition_t other;
 bool confirmed=false, pending=true, confirmationOk=false, imageValid=true;
-unsigned inspections=0, switches=0, updates=0;
+unsigned inspections=0, otadataWrites=0, updates=0;
 namespace ota_boot {
 bool runningSlotConfirmed() { return confirmed; }
 bool confirmationPending() { return pending; }
 SlotCheck runningSlotCheck() { return confirmed ? SlotCheck::Confirmed : SlotCheck::Unconfirmed; }
 SelectionResult nextSelection=SelectionResult::Selected;
-SelectionResult switchTo(const esp_partition_t*, unsigned) { ++switches; return nextSelection; }
+SelectionResult switchTo(const esp_partition_t*, unsigned) { ++otadataWrites; return nextSelection; }
 bool confirmRunningSlot() { if (confirmationOk) { confirmed=true; pending=false; } return confirmationOk; }
 }
 namespace guest_slot {
+enum class SwitchResult { NoGuest, GuardRefused, SelectionFailed, Selected, Unknown };
 struct Inspection { GuestImage image; bool bootableNonGuest=false; const esp_partition_t* partition=nullptr; };
 Inspection cached;
 bool cacheReady=false;
@@ -109,9 +110,9 @@ int main() {
   assert(home.guest.image.installed && home.guestLabel=="READMAXER 1.2.3" && grid.label==home.guestLabel && updates==1);
   guest_slot::inspect(); guest_slot::inspect();
   assert(inspections==1);
-  assert(guest_slot::switchGuest()==ota_boot::SelectionResult::Selected && inspections==2 && switches==1);
+  assert(guest_slot::switchGuest()==guest_slot::SwitchResult::Selected && inspections==2 && otadataWrites==1);
   imageValid=false;
-  assert(guest_slot::switchGuest()==ota_boot::SelectionResult::Failed && inspections==3 && switches==1);
+  assert(guest_slot::switchGuest()==guest_slot::SwitchResult::NoGuest && inspections==3 && otadataWrites==1);
   guest_slot::invalidateCache();
   assert(!guest_slot::inspect().image.installed && inspections==4);
   imageValid=true;
@@ -121,7 +122,7 @@ int main() {
   home.renderList();
   assert(home.guest.image.installed && home.guestLabel=="READMAXER 1.2.3" && updates==2);
   confirmed=false;
-  assert(guest_slot::switchGuest()==ota_boot::SelectionResult::Failed && switches==1);
+  assert(guest_slot::switchGuest()==guest_slot::SwitchResult::GuardRefused && otadataWrites==1);
   confirmed=true; pending=false;
   ota_boot::nextSelection=ota_boot::SelectionResult::Unknown;
   homeSwitch(); assert(restarts==1 && popups==0);

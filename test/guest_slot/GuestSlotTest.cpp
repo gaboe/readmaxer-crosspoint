@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "FirmwareHostTag.h"
+#include "GuestDevLoop.h"
 #include "GuestSlotModel.h"
 
 namespace {
@@ -43,6 +44,14 @@ bool hasGuestMarker(const std::vector<uint8_t>& bytes, size_t chunk = 17) {
 }
 
 }  // namespace
+
+TEST(GuestDevLoop, FlagOpensInstallOnNormalBootOnly) {
+  EXPECT_FALSE(guest_devloop::shouldOpen(false, false, false, false));
+  EXPECT_TRUE(guest_devloop::shouldOpen(true, false, false, false));
+  EXPECT_FALSE(guest_devloop::shouldOpen(true, true, false, false));
+  EXPECT_FALSE(guest_devloop::shouldOpen(true, false, true, false));
+  EXPECT_FALSE(guest_devloop::shouldOpen(true, false, false, true));
+}
 
 TEST(GuestSlot, DescriptorRejectsAbsentWrongProjectAndCorruption) {
   std::vector<uint8_t> absent(4096, 0xFF);

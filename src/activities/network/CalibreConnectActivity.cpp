@@ -92,6 +92,7 @@ void CalibreConnectActivity::startWebServer() {
   }
 
   webServer.reset(new CrossPointWebServer());
+  webServer->setRemoteInput(mappedInput);
   webServer->begin();
 
   if (webServer->isRunning()) {
@@ -118,6 +119,7 @@ void CalibreConnectActivity::loop() {
     constexpr int MAX_ITERATIONS = 80;
     for (int i = 0; i < MAX_ITERATIONS && webServer->isRunning(); i++) {
       webServer->handleClient();
+      if (mappedInput.hasRemoteClick()) break;
       if ((i & 0x07) == 0x07) {
         resetTaskWatchdogIfSubscribed();
       }
@@ -130,6 +132,8 @@ void CalibreConnectActivity::loop() {
       }
     }
     lastHandleClientTime = millis();
+
+    if (mappedInput.wasPressed(MappedInputManager::Button::Back)) exitRequested = true;
 
     const auto status = webServer->getWsUploadStatus();
     bool changed = false;

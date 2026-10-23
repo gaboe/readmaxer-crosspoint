@@ -93,14 +93,22 @@ bool switchAllowed() {
                    ota_boot::confirmationPending());
 }
 
-ota_boot::SelectionResult switchGuest() {
+SwitchResult switchGuest() {
   if (!switchAllowed() || !canSwitch(ota_boot::runningSlotCheck(), ota_boot::confirmationPending()))
-    return ota_boot::SelectionResult::Failed;
+    return SwitchResult::GuardRefused;
   const Inspection fresh = inspectFresh();
-  if (!fresh.image.installed || !fresh.partition || !switchAllowed() ||
-      !canSwitch(ota_boot::runningSlotCheck(), ota_boot::confirmationPending()))
-    return ota_boot::SelectionResult::Failed;
-  return ota_boot::switchTo(fresh.partition, ota_boot::kOtaImgNew);
+  if (!fresh.image.installed || !fresh.partition) return SwitchResult::NoGuest;
+  if (!switchAllowed() || !canSwitch(ota_boot::runningSlotCheck(), ota_boot::confirmationPending()))
+    return SwitchResult::GuardRefused;
+  switch (ota_boot::switchTo(fresh.partition, ota_boot::kOtaImgNew)) {
+    case ota_boot::SelectionResult::Selected:
+      return SwitchResult::Selected;
+    case ota_boot::SelectionResult::Unknown:
+      return SwitchResult::Unknown;
+    case ota_boot::SelectionResult::Failed:
+      return SwitchResult::SelectionFailed;
+  }
+  return SwitchResult::SelectionFailed;
 }
 
 bool bootableNonGuest(const esp_partition_t* partition) {

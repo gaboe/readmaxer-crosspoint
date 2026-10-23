@@ -1,19 +1,55 @@
-# Install the READMAXER guest over Wi-Fi
+# Control the READMAXER guest over Wi-Fi
 
-Known POC limit: the install screen exposes the install endpoint to every client
-on the joined Wi-Fi. Use it only on a trusted network.
+Known POC limit: the web server has no authentication. Any client on the joined
+Wi-Fi can install or start the guest, send input, and read the screen. Use a
+trusted network.
 
 1. Save the reader's Wi-Fi network in Settings.
 2. Open **Settings > General > Install READMAXER** on the X4 Pro.
 3. Wait for the screen to show its hostname and IP address.
-4. Run the uploader from the repository root. The Mac needs Rust and curl.
+4. Run the tool from the repository root. The Mac needs Rust and curl.
 
 ```sh
-READER_HOST=readmaxer-98c377bea840.local cargo run --locked --release --manifest-path tools/install-guest/Cargo.toml -- /path/to/x4pro-guest.bin
+READER_HOST=readmaxer-98c377bea840.local cargo run --locked --release --manifest-path tools/install-guest/Cargo.toml -- install /path/to/x4pro-guest.bin
 ```
 
 Use the hostname shown on your reader. `READER_HOST` defaults to `crosspoint.local`.
 An IP address also works.
+
+The tool also accepts these commands after the install screen is open:
+
+```sh
+cargo run --locked --manifest-path tools/install-guest/Cargo.toml -- state
+cargo run --locked --manifest-path tools/install-guest/Cargo.toml -- start
+cargo run --locked --manifest-path tools/install-guest/Cargo.toml -- fetch-diag ./reader-diag
+cargo run --locked --manifest-path tools/install-guest/Cargo.toml -- input back
+cargo run --locked --manifest-path tools/install-guest/Cargo.toml -- screen ./screen.pbm
+cargo run --locked --manifest-path tools/install-guest/Cargo.toml -- wait 60
+```
+
+Set `READER_HOST` for each command, or export it once in the shell. `wait`
+polls `/api/status` until the reader answers or the timeout expires. The
+default timeout is 60 seconds. `fetch-diag` downloads `diag.txt` and
+`diag-last.txt` from `/readmaxer`; a missing file is reported and skipped.
+`screen` writes a binary PBM image in physical panel orientation.
+
+To enter the install screen after every normal boot, upload an empty
+`/readmaxer/devloop` file while a web server screen is open:
+
+```sh
+touch devloop
+curl --noproxy '*' -F 'file=@devloop;filename=devloop' "http://$READER_HOST/upload?path=/readmaxer"
+```
+
+Remove the flag through `/delete` to restore normal boot routing:
+
+```sh
+curl --noproxy '*' -d 'path=/readmaxer/devloop' "http://$READER_HOST/delete"
+```
+
+The flag takes effect at the next boot. Recovery, crash reporting, and
+first-boot slot confirmation still open their own screens. Back leaves the
+install screen without removing the flag.
 
 The tool copies the image to temporary storage and calculates its SHA-256.
 It replaces only the staging files `/readmaxer/install.bin` and `/readmaxer/install.json`.
@@ -40,6 +76,11 @@ Do not repeat the install automatically. Check the reader first.
 The image must target this reader's MAC address and use the project name `readmaxer-xteink-x4pro`.
 The installer refuses an unconfirmed running slot. Open Home before trying again.
 Wi-Fi failure returns an error. There is no USB fallback.
+`start` uses the same guarded guest switch as the Home READMAXER item.
+`NO_GUEST` means no guest is installed. `GUARD_REFUSED` means the switch guard
+refused without an otadata write. A lost response, `SELECTION_FAILED`, or
+`SELECTION_UNKNOWN` leaves the boot result unconfirmed. Check the reader
+before another start request.
 
 Run the host tool tests with:
 
