@@ -16,6 +16,7 @@
 #include <HalTiltSensor.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <SPI.h>
 #include <TrustedTime.h>
 #include <VectorFontSupport.h>
@@ -75,10 +76,24 @@ SdCardFontSystem sdFontSystem;
 FontCacheManager fontCacheManager(renderer.getFontMap(), renderer.getSdCardFonts(), renderer.getTtfFonts());
 static unsigned long allowSleepAt = 0;
 static unsigned long lastX4ProPowerClickAt = 0;
+#if FREEINK_DEVICE_X4PRO
+static bool openGuestInstallAfterConfirmation = false;
+#endif
 
 namespace {
 constexpr unsigned long X4PRO_POWER_DOUBLE_CLICK_MS = 500;
 constexpr unsigned long X4PRO_POWER_CLICK_MAX_HOLD_MS = 300;
+
+#if FREEINK_DEVICE_X4PRO
+void openGuestInstallScreen() {
+  auto activity = makeUniqueNoThrow<GuestInstallActivity>(renderer, mappedInputManager);
+  if (!activity) {
+    LOG_ERR("MAIN", "OOM: guest install activity (%u bytes)", static_cast<unsigned>(sizeof(GuestInstallActivity)));
+    return;
+  }
+  activityManager.replaceActivity(std::move(activity));
+}
+#endif
 }  // namespace
 
 // A wake hold must never become an in-app power-button action.  Boot may continue
@@ -798,9 +813,13 @@ void setup() {
       break;
   }
 
-  // Output polarity is resolved per render by ActivityManager (night mode
-  // inverts only the reading surfaces), so nothing to restore here.
+    // Output polarity is resolved per render by ActivityManager (night mode
+    // inverts only the reading surfaces), so nothing to restore here.
 
+#if FREEINK_DEVICE_X4PRO
+  const auto devLoopRoute = guest_devloop::route(Storage.exists(guest_devloop::kFlagPath), recoveryFirmwareMode,
+                                                 rebootedFromPanic, ota_boot::confirmationPending());
+#endif
   if (recoveryFirmwareMode) {
     // Skip normal home/reader routing: jump straight into the SD firmware picker.
     activityManager.replaceActivity(
@@ -808,14 +827,16 @@ void setup() {
   } else if (rebootedFromPanic) {
     // If we rebooted from a panic, go to crash report screen to show the panic info
     activityManager.goToCrashReport();
+#if FREEINK_DEVICE_X4PRO
+  } else if (devLoopRoute == guest_devloop::BootRoute::Install) {
+    openGuestInstallScreen();
+#endif
   } else if (ota_boot::confirmationPending()) {
     // This slot waits for Home to confirm it, so no resume target skips Home.
-    activityManager.goHome(HomeMenuItem::NONE, needsWakeRefresh);
 #if FREEINK_DEVICE_X4PRO
-  } else if (guest_devloop::shouldOpen(Storage.exists(guest_devloop::kFlagPath), recoveryFirmwareMode,
-                                       rebootedFromPanic, ota_boot::confirmationPending())) {
-    activityManager.replaceActivity(std::make_unique<GuestInstallActivity>(renderer, mappedInputManager));
+    openGuestInstallAfterConfirmation = devLoopRoute == guest_devloop::BootRoute::ConfirmInHome;
 #endif
+    activityManager.goHome(HomeMenuItem::NONE, needsWakeRefresh);
   } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_READER &&
              !APP_STATE.openEpubPath.empty()) {
     activityManager.goToReader(APP_STATE.openEpubPath);
@@ -1097,6 +1118,12 @@ void loop() {
 
   const unsigned long activityStartTime = millis();
   activityManager.loop();
+#if FREEINK_DEVICE_X4PRO
+  if (openGuestInstallAfterConfirmation && !ota_boot::confirmationPending()) {
+    openGuestInstallAfterConfirmation = false;
+    if (Storage.exists(guest_devloop::kFlagPath)) openGuestInstallScreen();
+  }
+#endif
   const unsigned long activityDuration = millis() - activityStartTime;
 
   const unsigned long loopDuration = millis() - loopStartTime;

@@ -163,6 +163,16 @@ CrossPointWebServer::CrossPointWebServer() {}
 CrossPointWebServer::~CrossPointWebServer() { stop(); }
 
 #if FREEINK_DEVICE_X4PRO
+namespace {
+void sendRestartingResponse(WebServer* server, int status, const char* body) {
+  server->sendHeader("Connection", "close");
+  server->send(status, "application/json", body);
+  server->client().stop();
+  delay(1000);
+  ESP.restart();
+}
+}  // namespace
+
 void CrossPointWebServer::handleGuestInstall() {
   if (!guestInstallStatus) {
     server->send(403, "application/json", "{\"result\":\"OPEN_INSTALL_SCREEN\"}");
@@ -198,14 +208,12 @@ void CrossPointWebServer::handleGuestInstall() {
   }
   snprintf(response, sizeof(response), "{\"result\":\"%s\",\"sha256\":\"%s\",\"receipt_saved\":%s,%s}", name, sha,
            receipt ? "true" : "false", details);
-  server->sendHeader("Connection", "close");
-  server->send(result == guest_install::Result::Ok ? 200 : 409, "application/json", response);
-  server->client().flush();
   if (result == guest_install::Result::Ok || result == guest_install::Result::SelectionUnknown) {
-    delay(250);
-    ESP.restart();
+    sendRestartingResponse(server.get(), result == guest_install::Result::Ok ? 200 : 409, response);
     return;
   }
+  server->sendHeader("Connection", "close");
+  server->send(409, "application/json", response);
   guestInstallStatus(false, name, guestInstallContext);
 }
 
@@ -316,15 +324,12 @@ void CrossPointWebServer::handleForkUpdate() {
   const auto result = firmware_flash::flashFromSdPath(path.c_str(), nullptr, nullptr);
   char response[96];
   snprintf(response, sizeof(response), "{\"result\":\"%s\"}", firmware_flash::resultName(result));
-  server->sendHeader("Connection", "close");
-  server->send(result == firmware_flash::Result::OK || result == firmware_flash::Result::OTADATA_UNKNOWN ? 200 : 500,
-               "application/json", response);
-  server->client().flush();
   if (result == firmware_flash::Result::OK || result == firmware_flash::Result::OTADATA_UNKNOWN) {
-    delay(250);
-    ESP.restart();
+    sendRestartingResponse(server.get(), 200, response);
     return;
   }
+  server->sendHeader("Connection", "close");
+  server->send(500, "application/json", response);
   guestInstallStatus(false, firmware_flash::resultName(result), guestInstallContext);
 }
 #endif

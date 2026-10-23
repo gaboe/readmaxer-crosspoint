@@ -16,6 +16,15 @@ while depth:
     depth += (source[end] == "{") - (source[end] == "}")
     end += 1
 handler = source[start:end]
+helper_signature = "void sendRestartingResponse(WebServer* server"
+helper_start = source.index(helper_signature)
+helper_opening = source.index("{", helper_start)
+helper_depth = 1
+helper_end = helper_opening + 1
+while helper_depth:
+    helper_depth += (source[helper_end] == "{") - (source[helper_end] == "}")
+    helper_end += 1
+restart_response = source[helper_start:helper_end]
 
 program = r"""
 #include <cassert>
@@ -79,10 +88,14 @@ struct AppWriteGuard {
 const void* esp_ota_get_next_update_partition(void*) { return reinterpret_cast<void*>(1); }
 bool wsUploadInProgress = false;
 int restarts = 0;
-void delay(int) {}
+int lastDelay = 0;
+void delay(int ms) { lastDelay = ms; }
 struct { void restart() { ++restarts; } } ESP;
 
-struct Client { void flush() {} };
+struct Client {
+  int stops = 0;
+  void stop() { ++stops; }
+};
 struct Server {
   String path = "/fork.bin";
   int status = 0;
@@ -93,9 +106,17 @@ struct Server {
   void sendHeader(const char*, const char*) {}
   Client& client() { return connection; }
 };
+using WebServer = Server;
+RESTART_RESPONSE
+
+struct ServerOwner {
+  Server* value;
+  Server* get() const { return value; }
+  Server* operator->() const { return value; }
+};
 
 struct CrossPointWebServer {
-  Server* server;
+  ServerOwner server;
   struct { bool file = false; } upload, fontUpload;
   void (*guestInstallStatus)(bool, const char*, void*) = nullptr;
   void* guestInstallContext = nullptr;
@@ -118,11 +139,12 @@ void reset(Server& server, CrossPointWebServer& web) {
   ota_boot::pending = false;
   ota_boot::guardAllowed = true;
   restarts = 0;
+  lastDelay = 0;
 }
 
 int main() {
   Server server;
-  CrossPointWebServer web{&server};
+  CrossPointWebServer web{ServerOwner{&server}};
 
   reset(server, web);
   web.guestInstallStatus = nullptr;
@@ -164,9 +186,9 @@ int main() {
   reset(server, web);
   web.handleForkUpdate();
   assert(server.status == 200 && server.body == R"({"result":"OK"})");
-  assert(firmware_flash::flashCalls == 1 && restarts == 1);
+  assert(firmware_flash::flashCalls == 1 && server.connection.stops == 1 && lastDelay == 1000 && restarts == 1);
 }
-""".replace("HANDLER", handler)
+""".replace("HANDLER", handler).replace("RESTART_RESPONSE", restart_response)
 
 with tempfile.TemporaryDirectory(prefix="readmaxer-fork-update-") as directory:
     source_file = pathlib.Path(directory) / "test.cpp"

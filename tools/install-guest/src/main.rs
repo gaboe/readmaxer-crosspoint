@@ -39,6 +39,16 @@ struct Response {
 }
 
 fn exchange(host: &str, route: &str, args: &[String]) -> Result<Response> {
+    exchange_with_timeout(host, route, args, 300)
+}
+
+fn exchange_with_timeout(
+    host: &str,
+    route: &str,
+    args: &[String],
+    timeout_seconds: u64,
+) -> Result<Response> {
+    let max_time = timeout_seconds.to_string();
     let output = Command::new("curl")
         .args([
             "--silent",
@@ -48,7 +58,7 @@ fn exchange(host: &str, route: &str, args: &[String]) -> Result<Response> {
             "--connect-timeout",
             "10",
             "--max-time",
-            "300",
+            &max_time,
             "--noproxy",
             "*",
             "--proto",
@@ -95,6 +105,10 @@ fn validate_host(host: &str) -> Result<()> {
 fn command_result(host: &str, route: &str, action: &str, args: &[String]) -> Result<String> {
     let response = exchange(host, route, args)
         .map_err(|error| format!("{action} is unconfirmed. Check the reader. {error}"))?;
+    command_result_response(response, action)
+}
+
+fn command_result_response(response: Response, action: &str) -> Result<String> {
     let result: Value = serde_json::from_str(&response.body)
         .map_err(|_| format!("{action} is unconfirmed. Check the reader. Invalid JSON response"))?;
     let code = result["result"]
@@ -293,8 +307,13 @@ fn upload(host: &str, path: &Path, name: &str) -> Result<UploadReport> {
     upload_to(host, path, name, "/readmaxer")
 }
 
-fn wait_for_restart(host: &str, previous_uptime: u64, previous_version: &str) -> Result<String> {
-    let deadline = Instant::now() + Duration::from_secs(120);
+fn wait_for_restart(
+    host: &str,
+    previous_uptime: u64,
+    previous_version: &str,
+    update_response_lost: bool,
+) -> Result<String> {
+    let deadline = Instant::now() + Duration::from_secs(180);
     let mut went_offline = false;
     loop {
         match exchange(
@@ -312,7 +331,11 @@ fn wait_for_restart(host: &str, previous_uptime: u64, previous_version: &str) ->
                     if let (Some(version), Some(uptime)) =
                         (status["version"].as_str(), status["uptime"].as_u64())
                     {
-                        if went_offline || uptime < previous_uptime || version != previous_version {
+                        if update_response_lost
+                            || went_offline
+                            || uptime < previous_uptime
+                            || version != previous_version
+                        {
                             return Ok(format!("CrossPoint version: {version}"));
                         }
                     }
@@ -338,24 +361,74 @@ fn update_fork(host: &str, image: &Path) -> Result<String> {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let name = format!("readmaxer-fork-{}-{nonce}.bin", std::process::id());
     upload_to(host, &snapshot, &name, "/")?;
-    command_result(
+    let update_response_lost = match exchange_with_timeout(
         host,
         &format!("/api/readmaxer/update-fork?path=/{name}"),
-        "Fork update",
         &["--request".into(), "POST".into()],
-    )?;
-    wait_for_restart(host, previous_uptime, previous_version)
+        30,
+    ) {
+        Ok(response) => {
+            let result: Value = serde_json::from_str(&response.body)
+                .map_err(|_| "Fork update is unconfirmed. Invalid JSON response")?;
+            if result["result"] == "OTADATA_UNKNOWN" {
+                false
+            } else {
+                command_result_response(response, "Fork update")?;
+                false
+            }
+        }
+        Err(_) => true,
+    };
+    wait_for_restart(
+        host,
+        previous_uptime,
+        previous_version,
+        update_response_lost,
+    )
 }
 
-fn unconfirmed(host: &str, detail: &str) -> Box<dyn Error> {
-    let receipt = match request(host, "/download?path=/readmaxer/last-install.json", &[]) {
-        Ok(body) => format!("Stored receipt, which can be from an earlier install: {body}"),
-        Err(error) => format!("Receipt could not be read: {error}"),
-    };
-    format!(
-        "Install is unconfirmed. Do not retry automatically. Check the reader. {detail}\n{receipt}"
-    )
-    .into()
+fn unconfirmed(detail: &str) -> Box<dyn Error> {
+    format!("Install is unconfirmed. Do not retry automatically. Check the reader. {detail}").into()
+}
+
+fn wait_for_install_receipt(host: &str, sha: &str, timeout: Duration) -> Result<Value> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(response) =
+            exchange_with_timeout(host, "/download?path=/readmaxer/last-install.json", &[], 2)
+        {
+            if response.status == 200 {
+                if let Ok(receipt) = serde_json::from_str::<Value>(&response.body) {
+                    if receipt["sha256"].as_str() == Some(sha) {
+                        return Ok(receipt);
+                    }
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "No matching install receipt appeared within {} seconds",
+                timeout.as_secs()
+            )
+            .into());
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn install_result(receipt: Value, sha: &str) -> Result<String> {
+    let code = receipt["result"]
+        .as_str()
+        .ok_or("Install receipt has no result")?;
+    if code == "OK" {
+        return Ok(format!(
+            "Install receipt confirmed for SHA-256 {sha}: {receipt}"
+        ));
+    }
+    if code == "SELECTION_UNKNOWN" {
+        return Err(format!("Install is unconfirmed. Matching receipt: {receipt}").into());
+    }
+    Err(format!("Reader confirmed install result {code}: {receipt}").into())
 }
 
 fn install(host: &str, image: &Path) -> Result<String> {
@@ -398,25 +471,37 @@ fn install(host: &str, image: &Path) -> Result<String> {
     }
     let image_upload = upload(host, &image_copy, "install.bin")?;
     upload(host, &manifest, "install.json")?;
-    let response = exchange(
+    let response = exchange_with_timeout(
         host,
         "/api/readmaxer/install",
         &["--request".into(), "POST".into()],
-    )
-    .map_err(|error| unconfirmed(host, &error.to_string()))?;
+        30,
+    );
+    let response = match response {
+        Ok(response) => response,
+        Err(_) => {
+            let receipt =
+                wait_for_install_receipt(host, &sha, Duration::from_secs(45)).map_err(|_| {
+                    unconfirmed("No matching receipt was found for the uploaded image.")
+                })?;
+            let confirmed =
+                install_result(receipt, &sha).map_err(|error| unconfirmed(&error.to_string()))?;
+            return Ok(confirmed);
+        }
+    };
     let result: Value = serde_json::from_str(&response.body)
-        .map_err(|_| unconfirmed(host, "Invalid install response."))?;
+        .map_err(|_| unconfirmed("Invalid install response."))?;
     let Some(code) = result["result"].as_str().filter(|code| !code.is_empty()) else {
-        return Err(unconfirmed(host, "Invalid install result."));
+        return Err(unconfirmed("Invalid install result."));
     };
     if code == "SELECTION_UNKNOWN" {
-        return Err(unconfirmed(host, &response.body));
+        return Err(unconfirmed(&response.body));
     }
     if response.status == 409 && code != "OK" {
         return Err(format!("Reader reported an install error: {}", response.body).into());
     }
     if response.status != 200 || code != "OK" || result["sha256"] != sha {
-        return Err(unconfirmed(host, &response.body));
+        return Err(unconfirmed(&response.body));
     }
     let seconds = image_upload.elapsed.as_secs_f64();
     let rate = image_upload.bytes as f64 / seconds / 1024.0;
@@ -501,6 +586,9 @@ mod tests {
                 bytes.resize(header_end + length, 0);
                 stream.read_exact(&mut bytes[header_end..]).unwrap();
                 requests.push(String::from_utf8_lossy(&bytes).into_owned());
+                if code == 0 {
+                    continue;
+                }
                 write!(
                     stream,
                     "HTTP/1.1 {code} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -582,6 +670,9 @@ mod tests {
                     (500, "SD write failed".to_owned())
                 } else if stage == 3 && refuse_install {
                     (409, "{\"result\":\"WRONG_SHA\"}".to_owned())
+                } else if stage == 4 && lose_install_reply {
+                    let sha = format!("{:x}", Sha256::digest(b"guest fixture"));
+                    (200, format!("{{\"sha256\":\"{sha}\",\"result\":\"OK\"}}"))
                 } else if stage >= 3 {
                     (
                         200,
@@ -628,12 +719,9 @@ mod tests {
     }
 
     #[test]
-    fn lost_install_response_is_unconfirmed() {
+    fn lost_install_response_uses_receipt_for_uploaded_sha() {
         let (result, requests) = exercise(false, true, false);
-        let error = result.unwrap_err().to_string();
-        assert!(error.contains("Install is unconfirmed"));
-        assert!(error.contains("Stored receipt"));
-        assert!(error.contains("\"result\":\"OK\""));
+        assert!(result.unwrap().contains("Install receipt confirmed"));
         assert_eq!(requests.len(), 5);
         assert!(requests[4].starts_with("GET /download?path=/readmaxer/last-install.json "));
     }
@@ -759,7 +847,7 @@ mod tests {
                 (200, br#"{"version":"old","uptime":42}"#.to_vec()),
                 (200, b"uploaded".to_vec()),
                 (200, br#"{"result":"OK"}"#.to_vec()),
-                (503, b"restarting".to_vec()),
+                (0, Vec::new()),
                 (200, br#"{"version":"new","uptime":1}"#.to_vec()),
             ],
             |host| update_fork(host, &image),
@@ -787,5 +875,57 @@ mod tests {
         );
         assert!(result.unwrap_err().to_string().contains("WRONG_FORK"));
         assert_eq!(requests.len(), 3);
+    }
+
+    #[test]
+    fn fork_update_waits_after_lost_update_response() {
+        let staging = Staging::create().unwrap();
+        let image = staging.0.join("fork.bin");
+        fs::write(&image, b"fork fixture").unwrap();
+        let (result, requests) = serve(
+            vec![
+                (200, br#"{"version":"old","uptime":42}"#.to_vec()),
+                (200, b"uploaded".to_vec()),
+                (0, Vec::new()),
+                (200, br#"{"version":"new","uptime":1}"#.to_vec()),
+            ],
+            |host| update_fork(host, &image),
+        );
+        assert_eq!(result.unwrap(), "CrossPoint version: new");
+        assert!(requests[2].starts_with("POST /api/readmaxer/update-fork?path=/readmaxer-fork-"));
+        assert!(requests[3].starts_with("GET /api/status "));
+    }
+
+    #[test]
+    fn unknown_fork_selection_waits_for_reboot_evidence() {
+        let staging = Staging::create().unwrap();
+        let image = staging.0.join("fork.bin");
+        fs::write(&image, b"fork fixture").unwrap();
+        let (result, requests) = serve(
+            vec![
+                (200, br#"{"version":"old","uptime":42}"#.to_vec()),
+                (200, b"uploaded".to_vec()),
+                (200, br#"{"result":"OTADATA_UNKNOWN"}"#.to_vec()),
+                (503, b"restarting".to_vec()),
+                (200, br#"{"version":"new","uptime":1}"#.to_vec()),
+            ],
+            |host| update_fork(host, &image),
+        );
+        assert_eq!(result.unwrap(), "CrossPoint version: new");
+        assert!(requests[3].starts_with("GET /api/status "));
+        assert!(requests[4].starts_with("GET /api/status "));
+    }
+
+    #[test]
+    fn install_receipt_with_another_sha_is_ignored() {
+        let (result, requests) = serve(
+            vec![(200, br#"{"sha256":"older","result":"OK"}"#.to_vec())],
+            |host| wait_for_install_receipt(host, "uploaded", Duration::ZERO),
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No matching install receipt"));
+        assert!(requests[0].starts_with("GET /download?path=/readmaxer/last-install.json "));
     }
 }

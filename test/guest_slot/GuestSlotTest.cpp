@@ -45,12 +45,12 @@ bool hasGuestMarker(const std::vector<uint8_t>& bytes, size_t chunk = 17) {
 
 }  // namespace
 
-TEST(GuestDevLoop, FlagOpensInstallOnNormalBootOnly) {
-  EXPECT_FALSE(guest_devloop::shouldOpen(false, false, false, false));
-  EXPECT_TRUE(guest_devloop::shouldOpen(true, false, false, false));
-  EXPECT_FALSE(guest_devloop::shouldOpen(true, true, false, false));
-  EXPECT_FALSE(guest_devloop::shouldOpen(true, false, true, false));
-  EXPECT_FALSE(guest_devloop::shouldOpen(true, false, false, true));
+TEST(GuestDevLoop, ConfirmsUpdatedForkBeforeOpeningInstall) {
+  EXPECT_EQ(guest_devloop::route(false, false, false, false), guest_devloop::BootRoute::Normal);
+  EXPECT_EQ(guest_devloop::route(true, false, false, false), guest_devloop::BootRoute::Install);
+  EXPECT_EQ(guest_devloop::route(true, false, false, true), guest_devloop::BootRoute::ConfirmInHome);
+  EXPECT_EQ(guest_devloop::route(true, true, false, false), guest_devloop::BootRoute::Normal);
+  EXPECT_EQ(guest_devloop::route(true, false, true, false), guest_devloop::BootRoute::Normal);
 }
 
 TEST(GuestSlot, DescriptorRejectsAbsentWrongProjectAndCorruption) {
