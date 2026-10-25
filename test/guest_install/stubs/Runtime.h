@@ -11,18 +11,22 @@
 #include <string>
 #include <vector>
 
+#include "OtaSlotModel.h"
+
 constexpr int ESP_OK = 0;
 constexpr int ESP_MAC_WIFI_STA = 0;
 constexpr int ESP_IPADDR_TYPE_V4 = 0;
 struct esp_partition_t {
   uint32_t address;
   uint32_t size;
+  uint8_t subtype;
 };
+constexpr uint8_t ESP_PARTITION_SUBTYPE_APP_OTA_1 = 0x11;
 
 namespace fake {
 inline std::map<std::string, std::vector<uint8_t>> files;
-inline esp_partition_t running{0x10000, 0x5c0000};
-inline esp_partition_t destination{0x5d0000, 0x5c0000};
+inline esp_partition_t running{0x10000, 0x5c0000, 0x10};
+inline esp_partition_t destination{0x5d0000, 0x5c0000, ESP_PARTITION_SUBTYPE_APP_OTA_1};
 inline std::vector<uint8_t> flash;
 inline bool guardAllowed = true;
 inline bool guardHeld = false;
@@ -35,6 +39,12 @@ inline bool expectGuardedRead = true;
 inline bool changeSource = false;
 inline bool failReceiptClose = false;
 inline bool failReceiptRename = false;
+inline ota_boot::SlotCheck slotCheck = ota_boot::SlotCheck::Confirmed;
+inline const esp_partition_t* selectedPartition = nullptr;
+inline bool failRemove = false;
+inline bool replaceSdFilesAfterPartitionRead = false;
+inline std::vector<uint8_t> replacementManifest;
+inline std::vector<uint8_t> replacementImage;
 inline int erases = 0;
 inline size_t erasedBytes = 0;
 inline int writes = 0;
@@ -79,7 +89,7 @@ inline struct StorageStub {
     return true;
   }
   bool exists(const char* path) { return fake::files.contains(path); }
-  bool remove(const char* path) { return fake::files.erase(path) != 0; }
+  bool remove(const char* path) { return !fake::failRemove && fake::files.erase(path) != 0; }
   bool rename(const char* oldPath, const char* newPath) {
     if (fake::failReceiptRename && std::strcmp(oldPath, "/readmaxer/last-install.tmp") == 0) return false;
     if (!exists(oldPath) || exists(newPath)) return false;
@@ -116,6 +126,11 @@ inline int esp_partition_read(const esp_partition_t* partition, size_t offset, v
   EXPECT_EQ(partition, &fake::destination);
   if (fake::expectGuardedRead) EXPECT_TRUE(fake::guardHeld);
   if (fake::failRead) return -1;
+  if (fake::replaceSdFilesAfterPartitionRead) {
+    fake::replaceSdFilesAfterPartitionRead = false;
+    fake::files["/readmaxer/update.json"] = fake::replacementManifest;
+    fake::files["/readmaxer/update.bin"] = fake::replacementImage;
+  }
   std::memcpy(data, fake::flash.data() + offset, len);
   if (fake::corruptReadback && len) static_cast<uint8_t*>(data)[0] ^= 1;
   return ESP_OK;

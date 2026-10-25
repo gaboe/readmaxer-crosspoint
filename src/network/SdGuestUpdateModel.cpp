@@ -10,9 +10,11 @@
 
 namespace sd_guest_update {
 namespace {
+#if !defined(SD_GUEST_UPDATE_EXTERNAL_VERIFIER)
 constexpr uint8_t pinnedPublicKey[32] = {0x91, 0xe4, 0xfe, 0x88, 0x02, 0xce, 0x03, 0xd4, 0x1c, 0xb8, 0xfd,
                                          0x63, 0x1a, 0xd2, 0x8f, 0x61, 0xf1, 0x6d, 0x30, 0xde, 0xa3, 0x92,
                                          0x4b, 0x59, 0x92, 0x36, 0x8d, 0xc8, 0xe7, 0xfb, 0xa1, 0xa0};
+#endif
 
 int base64Digit(char c) {
   if (c >= 'A' && c <= 'Z') return c - 'A';
@@ -108,8 +110,10 @@ Result parseAndVerifyWithKey(const uint8_t* json, size_t length, const char* dev
   return Result::Ok;
 }
 
+#if !defined(SD_GUEST_UPDATE_EXTERNAL_VERIFIER)
 Result parseAndVerify(const uint8_t* json, size_t length, const char* deviceId, uint32_t maximumSize,
                       Manifest& manifest) {
   return parseAndVerifyWithKey(json, length, deviceId, maximumSize, pinnedPublicKey, manifest);
 }
+#endif
 }  // namespace sd_guest_update

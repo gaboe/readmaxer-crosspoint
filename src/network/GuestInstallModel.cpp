@@ -72,6 +72,8 @@ const char* resultName(Result result) {
       return "BAD_IDENTITY";
     case Result::TooLarge:
       return "TOO_LARGE";
+    case Result::WrongSize:
+      return "WRONG_SIZE";
     case Result::ReadFailed:
       return "READ_FAILED";
     case Result::NoMemory:

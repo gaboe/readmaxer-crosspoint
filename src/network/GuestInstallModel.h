@@ -12,6 +12,7 @@ enum class Result {
   BadImage,
   BadIdentity,
   TooLarge,
+  WrongSize,
   ReadFailed,
   NoMemory,
   NoPartition,

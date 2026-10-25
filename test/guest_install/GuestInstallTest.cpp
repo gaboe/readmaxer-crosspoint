@@ -25,12 +25,14 @@ AppWriteGuard::AppWriteGuard(const esp_partition_t*) {
 }
 AppWriteGuard::~AppWriteGuard() { fake::guardHeld = false; }
 bool confirmationPending() { return fake::pending; }
-SlotCheck runningSlotCheck() { return SlotCheck::Confirmed; }
+SlotCheck runningSlotCheck() { return fake::slotCheck; }
 SelectionResult switchTo(const esp_partition_t* dest, uint32_t state) {
-  EXPECT_EQ(dest, &fake::destination);
+  EXPECT_TRUE(dest == &fake::destination || dest == &fake::running);
   EXPECT_FALSE(fake::guardHeld);
   ++fake::selections;
   fake::selectedState = state;
+  fake::selectedPartition = dest;
+  fake::slotCheck = dest == &fake::running ? SlotCheck::Confirmed : SlotCheck::FellBack;
   return fake::selection;
 }
 }  // namespace ota_boot
@@ -223,6 +225,8 @@ class GuestInstallProduction : public testing::Test {
     fake::guardHeld = fake::pending = fake::samePartition = fake::corruptReadback = false;
     fake::failWrite = fake::failRead = fake::changeSource = fake::failReceiptClose = false;
     fake::failReceiptRename = false;
+    fake::slotCheck = ota_boot::SlotCheck::Confirmed;
+    fake::selectedPartition = nullptr;
     fake::erases = fake::writes = fake::selections = 0;
     fake::erasedBytes = 0;
     fake::selection = ota_boot::SelectionResult::Selected;

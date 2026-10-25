@@ -69,6 +69,10 @@ Result readManifest(Workspace& work, const char* path, char (&shaHex)[65], uint8
   std::memcpy(shaHex, text, sizeof(shaHex));
   return Result::Ok;
 }
+
+void formatSha(const uint8_t (&sha)[32], char (&shaHex)[65]) {
+  for (size_t i = 0; i < 32; ++i) std::snprintf(shaHex + 2 * i, 3, "%02x", sha[i]);
+}
 }  // namespace
 
 bool ownMac(char (&mac)[13]) {
@@ -99,7 +103,7 @@ Result install(char (&shaHex)[65], Timing& timing) {
 }
 
 Result installFromFiles(const char* manifestPath, const char* imagePath, char (&shaHex)[65], Timing& timing,
-                        void (*progress)(uint8_t)) {
+                        const VerifiedImage* verified, void (*progress)(uint8_t), SelectionPolicy selectionPolicy) {
   timing = {};
   shaHex[0] = '\0';
   const auto* running = esp_ota_get_running_partition();
@@ -115,7 +119,13 @@ Result installFromFiles(const char* manifestPath, const char* imagePath, char (&
   }
   uint8_t expected[32];
   const uint32_t manifestStart = millis();
-  const auto manifest = readManifest(*work, manifestPath, shaHex, expected);
+  Result manifest = Result::Ok;
+  if (verified) {
+    std::memcpy(expected, verified->sha, sizeof(expected));
+    formatSha(expected, shaHex);
+  } else {
+    manifest = readManifest(*work, manifestPath, shaHex, expected);
+  }
   timing.manifest = millis() - manifestStart;
   if (manifest != Result::Ok) return manifest;
   char mac[13];
@@ -124,6 +134,7 @@ Result installFromFiles(const char* manifestPath, const char* imagePath, char (&
   if (!Storage.openFileForRead("GUEST", imagePath, file)) return Result::ReadFailed;
   const auto size64 = file.fileSize64();
   if (size64 > dest->size) return Result::TooLarge;
+  if (verified && size64 != verified->size) return Result::WrongSize;
   const uint32_t size = static_cast<uint32_t>(size64);
   timing.imageBytes = size;
   if (mbedtls_sha256_starts(&work->imageHash, 0) || mbedtls_sha256_starts(&work->fileHash, 0))
@@ -182,6 +193,7 @@ Result installFromFiles(const char* manifestPath, const char* imagePath, char (&
     timing.readbackHash = millis() - readbackStart;
     if (std::memcmp(actual, expected, sizeof(actual))) return Result::BadReadback;
   }
+  if (selectionPolicy == SelectionPolicy::DeferUntilCleanup) return Result::Ok;
   const uint32_t selectionStart = millis();
   const auto selection = ota_boot::switchTo(dest);
   timing.selection = millis() - selectionStart;

@@ -21,10 +21,18 @@ struct Timing {
   uint32_t imageBytes = 0;
 };
 
+struct VerifiedImage {
+  uint8_t sha[32];
+  uint32_t size;
+};
+
+enum class SelectionPolicy { SelectAfterInstall, DeferUntilCleanup };
+
 // Fixed SD paths are served only while GuestInstallActivity owns the web server.
 Result install(char (&shaHex)[65], Timing& timing);
 Result installFromFiles(const char* manifestPath, const char* imagePath, char (&shaHex)[65], Timing& timing,
-                        void (*progress)(uint8_t) = nullptr);
+                        const VerifiedImage* verified = nullptr, void (*progress)(uint8_t) = nullptr,
+                        SelectionPolicy selectionPolicy = SelectionPolicy::SelectAfterInstall);
 bool writeReceipt(const char* shaHex, Result result, const Timing& timing);
 bool formatTiming(char* out, size_t capacity, const Timing& timing);
 bool ownMac(char (&mac)[13]);

@@ -60,6 +60,7 @@ bool hashPartition(Workspace& work, const esp_partition_t* partition, uint32_t s
 }
 
 void refuse(Result reason) {
+  static_cast<void>(reason);
   LOG_ERR("SDUP", "Refused: %s", resultName(reason));
   if (!Storage.remove(manifestPath)) LOG_ERR("SDUP", "Cannot remove update manifest");
 }
@@ -69,13 +70,17 @@ bool pending() { return Storage.exists(manifestPath); }
 
 void installPending(void (*showProgress)(uint8_t)) {
   if (!pending()) return;
-  if (ota_boot::confirmationPending() || ota_boot::runningSlotCheck() != ota_boot::SlotCheck::Confirmed) {
+  if (ota_boot::confirmationPending()) {
     LOG_INF("SDUP", "Waiting for OTA confirmation");
+    return;
+  }
+  if (ota_boot::runningSlotCheck() != ota_boot::SlotCheck::Confirmed) {
+    refuse(Result::InstallFailed);
     return;
   }
   const auto* dest = esp_ota_get_next_update_partition(nullptr);
   const auto* running = esp_ota_get_running_partition();
-  if (!dest || !running || dest->address == running->address) {
+  if (!dest || !running || dest->address == running->address || dest->subtype != ESP_PARTITION_SUBTYPE_APP_OTA_1) {
     refuse(Result::InstallFailed);
     return;
   }
@@ -129,14 +134,15 @@ void installPending(void (*showProgress)(uint8_t)) {
       refuse(Result::InstallFailed);
       return;
     }
-    if (ota_boot::switchTo(dest) != ota_boot::SelectionResult::Selected) {
-      refuse(Result::InstallFailed);
+    if (!Storage.remove(manifestPath)) {
+      LOG_ERR("SDUP", "Cannot remove update manifest");
       return;
     }
-    if (!Storage.remove(manifestPath))
-      LOG_ERR("SDUP", "Cannot remove update manifest");
-    else if (!Storage.remove(imagePath))
-      LOG_ERR("SDUP", "Cannot remove update image");
+    if (!Storage.remove(imagePath)) LOG_ERR("SDUP", "Cannot remove update image");
+    if (ota_boot::switchTo(dest) != ota_boot::SelectionResult::Selected) {
+      LOG_ERR("SDUP", "Cannot select installed guest slot");
+      return;
+    }
     ESP.restart();
     return;
   }
@@ -144,17 +150,42 @@ void installPending(void (*showProgress)(uint8_t)) {
   if (showProgress) showProgress(0);
   char sha[65];
   guest_install::Timing timing;
-  const auto installed = guest_install::installFromFiles(manifestPath, imagePath, sha, timing, showProgress);
-  if (!guest_install::writeReceipt(sha, installed, timing)) LOG_ERR("SDUP", "Cannot save install receipt");
+  guest_install::VerifiedImage verified{};
+  verified.size = manifest.size;
+  std::memcpy(verified.sha, manifest.sha, sizeof(verified.sha));
+  const auto installed = guest_install::installFromFiles(manifestPath, imagePath, sha, timing, &verified, showProgress,
+                                                         guest_install::SelectionPolicy::DeferUntilCleanup);
   if (installed != guest_install::Result::Ok) {
+    if (!guest_install::writeReceipt(sha, installed, timing)) LOG_ERR("SDUP", "Cannot save install receipt");
     LOG_ERR("SDUP", "Install: %s", guest_install::resultName(installed));
     refuse(Result::InstallFailed);
     return;
   }
-  if (!Storage.remove(manifestPath))
+  if (!Storage.remove(manifestPath)) {
     LOG_ERR("SDUP", "Cannot remove update manifest");
-  else if (!Storage.remove(imagePath))
-    LOG_ERR("SDUP", "Cannot remove update image");
+    if (!guest_install::writeReceipt(sha, installed, timing)) LOG_ERR("SDUP", "Cannot save install receipt");
+    return;
+  }
+  if (!Storage.remove(imagePath)) LOG_ERR("SDUP", "Cannot remove update image");
+  const uint32_t selectionStart = millis();
+  const auto selection = ota_boot::switchTo(dest);
+  timing.selection = millis() - selectionStart;
+  switch (selection) {
+    case ota_boot::SelectionResult::Selected:
+      break;
+    case ota_boot::SelectionResult::Failed:
+      LOG_ERR("SDUP", "Cannot select installed guest slot");
+      if (!guest_install::writeReceipt(sha, guest_install::Result::SelectionFailed, timing))
+        LOG_ERR("SDUP", "Cannot save install receipt");
+      return;
+    case ota_boot::SelectionResult::Unknown:
+      LOG_ERR("SDUP", "Guest slot selection is unknown");
+      if (!guest_install::writeReceipt(sha, guest_install::Result::SelectionUnknown, timing))
+        LOG_ERR("SDUP", "Cannot save install receipt");
+      return;
+  }
+  if (!guest_install::writeReceipt(sha, guest_install::Result::Ok, timing))
+    LOG_ERR("SDUP", "Cannot save install receipt");
   LOG_INF("SDUP", "Installed %s", sha);
   ESP.restart();
 }
