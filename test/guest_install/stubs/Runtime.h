@@ -31,6 +31,7 @@ inline bool samePartition = false;
 inline bool corruptReadback = false;
 inline bool failWrite = false;
 inline bool failRead = false;
+inline bool expectGuardedRead = true;
 inline bool changeSource = false;
 inline bool failReceiptClose = false;
 inline bool failReceiptRename = false;
@@ -38,6 +39,7 @@ inline int erases = 0;
 inline size_t erasedBytes = 0;
 inline int writes = 0;
 inline int selections = 0;
+inline int restarts = 0;
 inline uint32_t selectedState = 0;
 }  // namespace fake
 
@@ -112,7 +114,7 @@ inline int esp_partition_write(const esp_partition_t* partition, size_t offset, 
 }
 inline int esp_partition_read(const esp_partition_t* partition, size_t offset, void* data, size_t len) {
   EXPECT_EQ(partition, &fake::destination);
-  EXPECT_TRUE(fake::guardHeld);
+  if (fake::expectGuardedRead) EXPECT_TRUE(fake::guardHeld);
   if (fake::failRead) return -1;
   std::memcpy(data, fake::flash.data() + offset, len);
   if (fake::corruptReadback && len) static_cast<uint8_t*>(data)[0] ^= 1;
@@ -142,6 +144,9 @@ inline int mbedtls_sha256_finish(mbedtls_sha256_context* sha, uint8_t* out) {
 inline void delay(unsigned) {}
 inline uint32_t millis() { return 100; }
 inline void resetTaskWatchdogIfSubscribed() {}
+inline struct EspStub {
+  void restart() { ++fake::restarts; }
+} ESP;
 #define LOG_ERR(...) ((void)0)
 #define LOG_INF(...) ((void)0)
 

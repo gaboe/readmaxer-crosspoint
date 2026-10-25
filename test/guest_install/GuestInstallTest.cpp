@@ -342,6 +342,36 @@ TEST_F(GuestInstallProduction, WriteFailureNeverSelects) {
   EXPECT_FALSE(fake::guardHeld);
 }
 
+TEST_F(GuestInstallProduction, SdSourceRetriesAfterInterruptedWrite) {
+  fake::files["/readmaxer/update.json"] = fake::files.at("/readmaxer/install.json");
+  fake::files["/readmaxer/update.bin"] = fake::files.at("/readmaxer/install.bin");
+  fake::files.erase("/readmaxer/install.json");
+  fake::files.erase("/readmaxer/install.bin");
+  fake::failWrite = true;
+  EXPECT_EQ(guest_install::installFromFiles("/readmaxer/update.json", "/readmaxer/update.bin", sha, timing),
+            Result::WriteFailed);
+  EXPECT_EQ(fake::selections, 0);
+  fake::failWrite = false;
+  EXPECT_EQ(guest_install::installFromFiles("/readmaxer/update.json", "/readmaxer/update.bin", sha, timing),
+            Result::Ok);
+  EXPECT_EQ(fake::selections, 1);
+  EXPECT_TRUE(std::equal(fake::files.at("/readmaxer/update.bin").begin(), fake::files.at("/readmaxer/update.bin").end(),
+                         fake::flash.begin()));
+}
+
+TEST_F(GuestInstallProduction, SdSourceRefusesMissingImageAndWrongSha) {
+  fake::files["/readmaxer/update.json"] = fake::files.at("/readmaxer/install.json");
+  EXPECT_EQ(guest_install::installFromFiles("/readmaxer/update.json", "/readmaxer/update.bin", sha, timing),
+            Result::ReadFailed);
+  expectUntouched();
+  fake::files["/readmaxer/update.bin"] = fake::files.at("/readmaxer/install.bin");
+  const std::string wrong = "{\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}";
+  fake::files["/readmaxer/update.json"] = Bytes(wrong.begin(), wrong.end());
+  EXPECT_EQ(guest_install::installFromFiles("/readmaxer/update.json", "/readmaxer/update.bin", sha, timing),
+            Result::WrongSha);
+  expectUntouched();
+}
+
 TEST_F(GuestInstallProduction, SelectionUnknownIsNotSuccess) {
   fake::selection = ota_boot::SelectionResult::Unknown;
   EXPECT_EQ(guest_install::install(sha, timing), Result::SelectionUnknown);

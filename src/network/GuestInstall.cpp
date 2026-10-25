@@ -57,10 +57,9 @@ bool readFile(uint32_t offset, void* dst, uint32_t len, void* ctx) {
   return file.seek(offset) && file.read(dst, len) == static_cast<int>(len);
 }
 
-Result readManifest(Workspace& work, char (&shaHex)[65], uint8_t (&sha)[32]) {
+Result readManifest(Workspace& work, const char* path, char (&shaHex)[65], uint8_t (&sha)[32]) {
   HalFile file;
-  if (!Storage.openFileForRead("GUEST", "/readmaxer/install.json", file) || file.fileSize() > 512)
-    return Result::BadManifest;
+  if (!Storage.openFileForRead("GUEST", path, file) || file.fileSize() > 512) return Result::BadManifest;
   const size_t size = file.fileSize();
   if (file.read(work.buffer, size) != static_cast<int>(size)) return Result::ReadFailed;
   JsonDocument doc;
@@ -96,6 +95,11 @@ bool announce() {
 }
 
 Result install(char (&shaHex)[65], Timing& timing) {
+  return installFromFiles("/readmaxer/install.json", "/readmaxer/install.bin", shaHex, timing);
+}
+
+Result installFromFiles(const char* manifestPath, const char* imagePath, char (&shaHex)[65], Timing& timing,
+                        void (*progress)(uint8_t)) {
   timing = {};
   shaHex[0] = '\0';
   const auto* running = esp_ota_get_running_partition();
@@ -111,13 +115,13 @@ Result install(char (&shaHex)[65], Timing& timing) {
   }
   uint8_t expected[32];
   const uint32_t manifestStart = millis();
-  const auto manifest = readManifest(*work, shaHex, expected);
+  const auto manifest = readManifest(*work, manifestPath, shaHex, expected);
   timing.manifest = millis() - manifestStart;
   if (manifest != Result::Ok) return manifest;
   char mac[13];
   if (!ownMac(mac)) return Result::BadIdentity;
   HalFile file;
-  if (!Storage.openFileForRead("GUEST", "/readmaxer/install.bin", file)) return Result::ReadFailed;
+  if (!Storage.openFileForRead("GUEST", imagePath, file)) return Result::ReadFailed;
   const auto size64 = file.fileSize64();
   if (size64 > dest->size) return Result::TooLarge;
   const uint32_t size = static_cast<uint32_t>(size64);
@@ -135,6 +139,7 @@ Result install(char (&shaHex)[65], Timing& timing) {
     if (!guard) return Result::GuardRefused;
     guest_slot::invalidateCache();
     const uint32_t writeStart = millis();
+    uint8_t shownQuarter = 0;
     for (uint32_t pos = 0; pos < size; pos += CHUNK) {
       const uint32_t len = std::min(CHUNK, size - pos);
       if (!readFile(pos, work->buffer, len, &file)) {
@@ -149,6 +154,11 @@ Result install(char (&shaHex)[65], Timing& timing) {
       if (esp_partition_write(dest, pos, work->buffer, len) != ESP_OK) {
         timing.eraseWrite = millis() - writeStart;
         return Result::WriteFailed;
+      }
+      const uint8_t quarter = static_cast<uint8_t>((static_cast<uint64_t>(pos + len) * 4) / size);
+      if (progress && quarter > shownQuarter) {
+        shownQuarter = quarter;
+        progress(static_cast<uint8_t>(quarter * 25));
       }
     }
     timing.eraseWrite = millis() - writeStart;

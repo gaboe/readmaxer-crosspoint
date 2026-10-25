@@ -47,6 +47,7 @@
 #include "activities/settings/GuestInstallActivity.h"
 #include "network/GuestDevLoop.h"
 #include "network/GuestLog.h"
+#include "network/SdGuestUpdate.h"
 #endif
 #include "activities/settings/SdFirmwareUpdateActivity.h"
 #include "components/UITheme.h"
@@ -78,9 +79,21 @@ static unsigned long allowSleepAt = 0;
 static unsigned long lastX4ProPowerClickAt = 0;
 #if FREEINK_DEVICE_X4PRO
 static bool openGuestInstallAfterConfirmation = false;
+static bool installSdUpdateAfterConfirmation = false;
 #endif
 
 namespace {
+#if FREEINK_DEVICE_X4PRO
+void showSdUpdateProgress(uint8_t percent) {
+  char text[96];
+  snprintf(text, sizeof(text), "%s %u%%", tr(STR_GUEST_UPDATE_INSTALLING), percent);
+  RenderLock lock;
+  renderer.clearScreen();
+  const auto top = (renderer.getScreenHeight() - renderer.getLineHeight(UI_10_FONT_ID)) / 2;
+  renderer.drawCenteredText(UI_10_FONT_ID, top, text, true, EpdFontFamily::BOLD);
+  renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+}
+#endif
 constexpr unsigned long X4PRO_POWER_DOUBLE_CLICK_MS = 500;
 constexpr unsigned long X4PRO_POWER_CLICK_MAX_HOLD_MS = 300;
 
@@ -785,6 +798,15 @@ void setup() {
 
   setupDisplayAndFonts(resume != BootResume::Splash);
 
+#if FREEINK_DEVICE_X4PRO
+  if (sd_guest_update::pending()) {
+    installSdUpdateAfterConfirmation = ota_boot::confirmationPending();
+    if (!installSdUpdateAfterConfirmation) {
+      sd_guest_update::installPending(showSdUpdateProgress);
+    }
+  }
+#endif
+
   switch (resume) {
     case BootResume::Silent:
       // Splash skipped: the routing block below picks the target activity; the
@@ -1119,6 +1141,11 @@ void loop() {
   const unsigned long activityStartTime = millis();
   activityManager.loop();
 #if FREEINK_DEVICE_X4PRO
+  if (installSdUpdateAfterConfirmation && !ota_boot::confirmationPending()) {
+    installSdUpdateAfterConfirmation = false;
+    sd_guest_update::installPending(showSdUpdateProgress);
+    activityManager.requestUpdateAndWait();
+  }
   if (openGuestInstallAfterConfirmation && !ota_boot::confirmationPending()) {
     openGuestInstallAfterConfirmation = false;
     if (Storage.exists(guest_devloop::kFlagPath)) openGuestInstallScreen();
