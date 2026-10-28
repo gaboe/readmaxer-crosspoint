@@ -5,7 +5,7 @@ from pathlib import Path
 
 Import("env")  # noqa: F821
 
-LIMIT = 0x50001C00
+LIMIT = 0x50001800
 SYMBOLS = ("_rtc_data_end", "_rtc_bss_end", "_rtc_noinit_end", "_rtc_force_slow_end")
 
 
@@ -19,7 +19,7 @@ def check_guest_rtc(target, source, env):
         end = int(match.group(1), 16)
         if end > LIMIT:
             raise RuntimeError(f"RTC layout overlaps guest log: {symbol}=0x{end:x} > 0x{LIMIT:x}")
-    print(f"Guest RTC log range starts at 0x{LIMIT:x}; firmware RTC sections fit")
+    print(f"Guest RTC range 0x{LIMIT:x}..0x50002000 is clear of firmware RTC sections")
 
 
 env.AddPostAction("$BUILD_DIR/${PROGNAME}.elf", check_guest_rtc)  # noqa: F821
