@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include <BoardConfig.h>
 #include <BookKey.h>
+#include <CpBootTrace.h>
 #include <Crypto.h>
 #include <DeviceSecret.h>
 #include <FsHelpers.h>
@@ -265,6 +266,23 @@ void CrossPointWebServer::handleGuestState() const {
   doc["guest_installed"] = guest.image.installed;
   doc["guest_version"] = guest.image.installed ? guest.image.version : "";
   doc["devloop"] = Storage.exists(guest_devloop::kFlagPath);
+  doc["fork_sha"] = CROSSPOINT_FORK_SHA;
+  const auto boots = cp_boot::snapshot();
+  auto array = doc["cp_boots"].to<JsonArray>();
+  for (size_t i = 0; i < boots.count(); ++i) {
+    auto boot = array.add<JsonObject>();
+    boot["counter"] = boots.counter(i);
+    boot["reset_reason"] = boots.resetReason(i);
+    boot["last_stage"] = cp_boot::stageName(boots.lastStage(i));
+    auto attempts = boot["sd_attempts"].to<JsonArray>();
+    for (size_t j = 0; j < cp_boot::Record::Attempts; ++j) {
+      const auto value = boots.sdAttempt(i, j);
+      if (value.stage == cp_boot::Stage::None) break;
+      auto attempt = attempts.add<JsonObject>();
+      attempt["stage"] = cp_boot::stageName(value.stage);
+      attempt["esp_err"] = value.error;
+    }
+  }
   sendJson(doc);
 }
 

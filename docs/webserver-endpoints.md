@@ -167,16 +167,65 @@ is read at boot. These endpoints have no authentication. Use a trusted network.
 ### `GET /api/readmaxer/state`
 
 X4 Pro only. The endpoint is enabled while **Install READMAXER** is open.
-It reports the running app slot, whether a guest is installed, its version,
-and whether `/readmaxer/devloop` exists:
+It reports the running app slot, guest installation, the devloop flag, build
+identity, and retained CrossPoint boot stages. Example response:
 
 ```json
-{"running_slot":"ota_0","guest_installed":true,"guest_version":"1.2.3","devloop":true}
+{
+  "running_slot": "ota_0",
+  "guest_installed": true,
+  "guest_version": "1.2.3",
+  "devloop": true,
+  "fork_sha": "4ba93709757e4dd10400a827d769525c8fbf0bb4",
+  "cp_boots": [
+    {
+      "counter": 2,
+      "reset_reason": 3,
+      "last_stage": "first-draw",
+      "sd_attempts": [{"stage": "sector-zero-read", "esp_err": 0}]
+    },
+    {
+      "counter": 1,
+      "reset_reason": 3,
+      "last_stage": "card-init",
+      "sd_attempts": [{"stage": "card-init", "esp_err": -32768}]
+    }
+  ]
+}
 ```
 
 `running_slot` is `ota_0`, `ota_1`, or `unknown`. `guest_version` is empty when
 no guest is installed. Outside the install screen, the endpoint returns HTTP
 403 with `OPEN_INSTALL_SCREEN`.
+
+`fork_sha` is the full Git HEAD SHA captured at build time. It does not identify
+uncommitted edits included in that build.
+
+`cp_boots` contains at most two boots, newest first. Each entry starts at the
+first statement of CrossPoint `setup()`. `counter` is an unsigned 16-bit value
+and wraps from 65535 to zero. `reset_reason` is the numeric ESP-IDF
+`esp_reset_reason()` value. `last_stage` is the latest recorded boot stage.
+`first-draw` means entry to the first panel refresh call. It does not prove
+that the physical panel completed a refresh.
+
+`sd_attempts` contains at most four entries in attempt order. Each entry retains
+only its latest observed stage and result. Host or slot setup uses the first
+entry before card initialization starts. Stages include `host-init`, `slot-init`,
+`card-init`, `sector-zero-read`, and `volume-mount`. `esp_err` is a signed value:
+
+- `0` means success for that recorded call.
+- `-32768` means the call was entered but had not returned when recorded.
+- `-32767` means an error did not fit in a signed 16-bit value.
+- Other values are SDK error codes. A failed volume mount uses synthetic
+  `ESP_FAIL`, or `-1`, because the filesystem mount returns only a boolean.
+
+The versioned record uses RTC no-init memory and one CRC for both boots. A bad
+CRC or unsupported version discards the history and restarts the counter at
+one. A reset during a record update can invalidate both entries. Power loss
+can erase the history. A boot that never reaches `setup()` adds no entry.
+HTTP cannot report an ongoing early boot hang. Read the older entry after a
+recovery boot that preserves RTC and reaches the install screen. Warm-reset
+retention and physical panel behavior still require device verification.
 
 ### `POST /api/readmaxer/start`
 

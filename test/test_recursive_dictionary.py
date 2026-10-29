@@ -44,6 +44,7 @@ marker = next(line for line in (ROOT / "src/util/Dictionary.h").read_text().spli
 selection = block(selector, "struct Selection {", True)
 plain_scratch = block(viewer, "struct DictionaryDefinitionActivity::PlainSelectionLine {", True)
 constants = viewer.split("namespace {", 1)[1].split("}  // namespace", 1)[0]
+constants = constants.replace("constexpr ", "[[maybe_unused]] constexpr ")
 viewer_loop = block(viewer, "void DictionaryDefinitionActivity::loop()")
 back_handler = viewer_loop.split("  int sx = 0;", 1)[1].split(
     "  if (lookup && mappedInput.wasReleased(MappedInputManager::Button::Confirm))", 1

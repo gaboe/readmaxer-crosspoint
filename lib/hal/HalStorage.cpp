@@ -1,5 +1,6 @@
 #include "HalStorage.h"
 
+#include <CpBootTrace.h>
 #include <FS.h>  // need to be included before SdFat.h for compatibility with FS.h's File class
 #include <Logging.h>
 #include <SDCardManager.h>
@@ -33,7 +34,12 @@ HalStorage::HalStorage() {
 
 // begin() and ready() are only called from setup, no need to acquire mutex for them
 
-bool HalStorage::begin() { return SDCard.begin(); }
+bool HalStorage::begin() {
+  cp_boot::storageBegin();
+  const bool ok = SDCard.begin();
+  cp_boot::storageEnd(ok);
+  return ok;
+}
 
 bool HalStorage::ready() const { return SDCard.ready(); }
 

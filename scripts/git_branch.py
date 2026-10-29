@@ -77,28 +77,29 @@ def get_base_version(project_dir):
 
 
 def inject_version(env):
-    # Only applies to development environments; release envs set the
-    # version via build_flags in platformio.ini and are unaffected.
-    if env['PIOENV'] not in ('default', 'sticky'):
-        return
-
     project_dir = env['PROJECT_DIR']
-    base_version = get_base_version(project_dir)
-    branch = get_git_branch(project_dir)
-    short_sha = get_git_short_sha(project_dir)
-    version_string = f'{base_version}-dev-{branch}-{short_sha}'
+    fork_sha = run_git_value(project_dir, ['rev-parse', 'HEAD'], 'fork SHA')
+    definitions = {'CROSSPOINT_FORK_SHA': fork_sha}
+    if env['PIOENV'] in ('default', 'sticky'):
+        base_version = get_base_version(project_dir)
+        branch = get_git_branch(project_dir)
+        short_sha = get_git_short_sha(project_dir)
+        version_string = f'{base_version}-dev-{branch}-{short_sha}'
+        definitions['CROSSPOINT_VERSION'] = version_string
+        print(f'CrossPoint build version: {version_string}')
 
-    def add_version(build_env, node):
-        # Only these translation units depend on Git metadata. Keep library and
-        # reader objects reusable when the branch or commit changes.
-        if b'CROSSPOINT_VERSION' not in node.srcnode().get_contents():
+    def add_identity(build_env, node):
+        source = node.srcnode().get_contents()
+        selected = [(name, value) for name, value in definitions.items()
+                    if name.encode() in source]
+        if not selected:
             return node
-        version_env = build_env.Clone()
-        version_env.Append(CPPDEFINES=[('CROSSPOINT_VERSION', f'\\"{version_string}\\"')])
-        return version_env.Object(node)
+        identity_env = build_env.Clone()
+        for name, value in selected:
+            identity_env.Append(CPPDEFINES=[(name, f'\\"{value}\\"')])
+        return identity_env.Object(node)
 
-    env.AddBuildMiddleware(add_version)
-    print(f'CrossPoint build version: {version_string}')
+    env.AddBuildMiddleware(add_identity)
 
 
 # PlatformIO/SCons entry point — Import and env are SCons builtins injected at runtime.

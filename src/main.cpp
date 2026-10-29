@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <BlePageTurner.h>
 #include <BoardConfig.h>
+#include <CpBootTrace.h>
 #include <Epub.h>
 #include <FontCacheManager.h>
 #include <FontDecompressor.h>
@@ -565,6 +566,7 @@ void enterDeepSleep(bool fromTimeout = false) {
 }
 
 void setupDisplayAndFonts(bool seamless = false) {
+  cp_boot::panelInit();
 #if !FREEINK_MCU_C3
   // C3 resolves its controller in HalGPIO::begin() before SPI claims the
   // display pins. X4 Pro skips that C3-only path, so probe here before
@@ -606,6 +608,7 @@ void setupDisplayAndFonts(bool seamless = false) {
 }
 
 void setup() {
+  cp_boot::begin(esp_reset_reason());
 #if FREEINK_DEVICE_X4PRO
   guest_log::captureAtBoot();
 #endif
