@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <filesystem>
 #include <fstream>
 #include <string>
 
@@ -26,8 +27,8 @@ void put(uint8_t* bytes, uint64_t value, size_t width) {
 
 void seal(uint8_t* bytes, size_t size) { put(bytes + size - 8, crc32(bytes, size - 8), 4); }
 
-Bytes fixture() {
-  std::ifstream input(RTC_FIXTURE);
+Bytes fixture(const std::filesystem::path& path = RTC_FIXTURE) {
+  std::ifstream input(path);
   std::string hex, line;
   while (input >> line) hex += line;
   EXPECT_EQ(hex.size(), RetainedCapture::BYTES * 2);
@@ -156,5 +157,25 @@ TEST(RetainedCapture, EveryHeaderCellCrcAndCommitStoreCutRejectsTornReplacement)
       }
     }
   }
+}
+
+TEST(RetainedCapture, InvalidEmergencyFixturesAreRejectedAndNewestFallsBack) {
+  for (const auto* name : {"telemetry-rtc-bad-reset.hex", "telemetry-rtc-bad-event.hex",
+                           "telemetry-rtc-bad-snapshot-length.hex", "telemetry-rtc-bad-reset-time.hex"}) {
+    auto bytes = fixture(std::filesystem::path(RTC_FIXTURE).parent_path() / name);
+    RetainedCapture capture;
+    capture.capture(bytes.data());
+    EXPECT_EQ(capture.raw(), bytes);
+    EXPECT_EQ(capture.emergency(1), nullptr) << name;
+    ASSERT_NE(capture.emergency(0), nullptr) << name;
+    EXPECT_EQ(capture.newestEmergency(), capture.emergency(0)) << name;
+  }
+  auto bytes = fixture(std::filesystem::path(RTC_FIXTURE).parent_path() / "telemetry-rtc-bad-prior-presence.hex");
+  RetainedCapture capture;
+  capture.capture(bytes.data());
+  EXPECT_EQ(capture.raw(), bytes);
+  EXPECT_EQ(capture.emergency(0), nullptr);
+  ASSERT_NE(capture.emergency(1), nullptr);
+  EXPECT_EQ(capture.newestEmergency(), capture.emergency(1));
 }
 }  // namespace
