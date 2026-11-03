@@ -242,11 +242,7 @@ Settings are grouped into **System**, **Display**, **Reader**, **Controls**, **L
   - "Book Bar Only" - Show book progress (as bar)
   - "Full w/ Chapter Bar" - Show status bar with chapter progress (as bar)
 
-- **Hide Battery %**: Configure where to suppress the battery percentage display in the status bar; the battery icon will still be shown:
-  
-  - "Never" (default) - Always show battery percentage
-  - "In Reader" - Show battery percentage everywhere except in reading mode
-  - "Always" - Always hide battery percentage
+- **Battery %**: When the battery icon is shown, the percentage is always shown beside it, also while charging.
 
 - **Refresh Frequency**: Set how often the screen does a full refresh while reading to reduce ghosting; options are every 1, 5, 10, 15, or 30 pages.
 

@@ -1,7 +1,12 @@
 #include "SettingsList.h"
 
+#include <HalStorage.h>
+#include <Logging.h>
+
 #include <array>
 #include <utility>
+
+#include "network/GuestDevLoop.h"
 
 void forEachBaseSetting(SettingVisitor visit, void* context) {
   // Load and save walk this list, so every condition here must be fixed before
@@ -41,9 +46,6 @@ void forEachBaseSetting(SettingVisitor visit, void* context) {
                          "sleepScreenCoverFilter", StrId::STR_CAT_DISPLAY));
   emit(SettingInfo::Enum(StrId::STR_QUICK_RESUME_TIMEOUT, &CrossPointSettings::quickResumeSleepScreen,
                          {StrId::STR_STATE_OFF, StrId::STR_STATE_ON}, "quickResumeSleepScreen",
-                         StrId::STR_CAT_DISPLAY));
-  emit(SettingInfo::Enum(StrId::STR_HIDE_BATTERY, &CrossPointSettings::hideBatteryPercentage,
-                         {StrId::STR_NEVER, StrId::STR_IN_READER, StrId::STR_ALWAYS}, "hideBatteryPercentage",
                          StrId::STR_CAT_DISPLAY));
   emit(SettingInfo::Enum(StrId::STR_REFRESH_FREQ, &CrossPointSettings::refreshFrequency,
                          {StrId::STR_PAGES_1, StrId::STR_PAGES_5, StrId::STR_PAGES_10, StrId::STR_PAGES_15,
@@ -196,6 +198,23 @@ void forEachBaseSetting(SettingVisitor visit, void* context) {
            .withWebHidden());
 
   // --- System ---
+#if FREEINK_DEVICE_X4PRO
+  emit(SettingInfo::DynamicEnum(
+           StrId::STR_DEV_LOOP, {StrId::STR_STATE_OFF, StrId::STR_STATE_ON},
+           [] { return static_cast<uint8_t>(Storage.exists(guest_devloop::kFlagPath)); },
+           [](uint8_t value) {
+             if (value != 0) {
+               if (!Storage.ensureDirectoryExists("/readmaxer") ||
+                   !Storage.writeFile(guest_devloop::kFlagPath, "1\n")) {
+                 LOG_ERR("SETTINGS", "Cannot enable DEV LOOP");
+               }
+             } else if (Storage.exists(guest_devloop::kFlagPath) && !Storage.remove(guest_devloop::kFlagPath)) {
+               LOG_ERR("SETTINGS", "Cannot disable DEV LOOP");
+             }
+           },
+           "devloop", StrId::STR_CAT_SYSTEM)
+           .withWebHidden());
+#endif
   emit(SettingInfo::Value(
       StrId::STR_TIME_TO_SLEEP, &CrossPointSettings::sleepTimeoutMinutes,
       {CrossPointSettings::MIN_SLEEP_TIMEOUT_MINUTES, CrossPointSettings::MAX_SLEEP_TIMEOUT_MINUTES, 1},

@@ -46,8 +46,8 @@ tool waits for a new boot and prints the version from `/api/status`. Check the
 reader before another attempt if the result is unconfirmed. The uploaded file
 stays on the SD root until you remove it.
 
-To enter the install screen after every normal boot, upload an empty
-`/readmaxer/devloop` file while a web server screen is open:
+To enter the install screen after every normal boot, turn on **Settings > System > DEV LOOP** on the X4 Pro
+(OFF deletes the file again), or upload an empty `/readmaxer/devloop` file while a web server screen is open:
 
 ```sh
 touch devloop

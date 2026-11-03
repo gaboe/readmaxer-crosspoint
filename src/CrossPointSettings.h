@@ -180,9 +180,6 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     LONG_PRESS_MENU_FUNCTION_COUNT
   };
 
-  // Hide battery percentage
-  enum HIDE_BATTERY_PERCENTAGE { HIDE_NEVER = 0, HIDE_READER = 1, HIDE_ALWAYS = 2, HIDE_BATTERY_PERCENTAGE_COUNT };
-
   // Page turn button long press behavior
   enum LONG_PRESS_BUTTON_BEHAVIOR {
     OFF = 0,
@@ -326,8 +323,6 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // 2=Title). See OpdsFilenameFormat. Persisted via a category-less SettingInfo::Enum,
   // edited from the OPDS server list; hidden from the on-device Settings screen.
   uint8_t opdsFilenameFormat = 0;
-  // Hide battery percentage
-  uint8_t hideBatteryPercentage = HIDE_NEVER;
   // Long-press page turn button behavior
   uint8_t longPressButtonBehavior = OFF;
   // Long-press Confirm function in EPUB reader (cycles through LONG_PRESS_MENU_FUNCTION values).

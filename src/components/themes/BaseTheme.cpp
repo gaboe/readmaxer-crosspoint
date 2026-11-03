@@ -330,10 +330,8 @@ void BaseTheme::applyHeaderStatus(const GfxRenderer& renderer, freeink::ui::Head
   // Static label buffers: headers draw on the single render task, and the
   // strings only need to outlive the fui::header() call that consumes them.
   static char percentText[8];
-  if (SETTINGS.hideBatteryPercentage != CrossPointSettings::HIDE_BATTERY_PERCENTAGE::HIDE_ALWAYS) {
-    snprintf(percentText, sizeof(percentText), "%u%%", static_cast<unsigned>(percentage));
-    status.battery.label = percentText;
-  }
+  snprintf(percentText, sizeof(percentText), "%u%%", static_cast<unsigned>(percentage));
+  status.battery.label = percentText;
   status.battery.glyphWidth = static_cast<int16_t>(metrics.batteryWidth);
   status.battery.glyphHeight = static_cast<int16_t>(metrics.batteryHeight);
   status.battery.gap = batteryPercentSpacing;
